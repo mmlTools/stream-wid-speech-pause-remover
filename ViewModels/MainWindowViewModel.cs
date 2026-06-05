@@ -462,14 +462,14 @@ public partial class MainWindowViewModel : ObservableObject
         if (SelectedClip is null || StorageProvider is null) return;
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
         {
-            Title = "Export EDL pause markers",
-            SuggestedFileName = Path.GetFileNameWithoutExtension(SelectedClip.FileName) + "_pauses.edl",
+            Title = "Export EDL cut list",
+            SuggestedFileName = Path.GetFileNameWithoutExtension(SelectedClip.FileName) + "_cutlist.edl",
             DefaultExtension = "edl"
         });
         var path = file?.TryGetLocalPath();
         if (string.IsNullOrWhiteSpace(path)) return;
         await EdlExporter.ExportPauseMarkersAsync(path, SelectedClip, ResolveFps);
-        Status = "Exported EDL pause markers.";
+        Status = "Exported EDL cut list.";
         NotifyExportCompleted(path);
     }
 

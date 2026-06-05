@@ -243,8 +243,8 @@ public partial class MainWindow : Window
         var dialog = new Window
         {
             Title = "Export Complete",
-            Width = 430,
-            Height = 310,
+            Width = 500,
+            Height = 330,
             CanResize = false,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             Background = new SolidColorBrush(Colors.Transparent),
@@ -390,7 +390,7 @@ public partial class MainWindow : Window
         var title = new TextBlock
         {
             Text = "Your export is ready",
-            FontSize = 20,
+            FontSize = 19,
             FontWeight = FontWeight.SemiBold,
             Foreground = new SolidColorBrush(Color.Parse("#E5ECF7"))
         };
@@ -417,14 +417,23 @@ public partial class MainWindow : Window
         var header = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("*,Auto"),
-            Margin = new Thickness(14, 10),
+            Margin = new Thickness(18, 12),
             Children = { title, headerCloseButton }
         };
         Grid.SetColumn(headerCloseButton, 1);
 
         var headerBand = new Border
         {
-            Background = new SolidColorBrush(Color.Parse("#101722")),
+            Background = new LinearGradientBrush
+            {
+                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
+                GradientStops =
+                {
+                    new GradientStop(Color.Parse("#142034"), 0),
+                    new GradientStop(Color.Parse("#111821"), 1)
+                }
+            },
             CornerRadius = new CornerRadius(10, 10, 0, 0),
             Child = header
         };
@@ -442,45 +451,102 @@ public partial class MainWindow : Window
 
         var message = new TextBlock
         {
-            Text = "Nice, the file finished exporting. You can open the destination folder now and check the result.",
+            Text = "The finished file has been saved successfully.",
+            FontSize = 15,
             TextWrapping = TextWrapping.Wrap,
             Foreground = new SolidColorBrush(Color.Parse("#B8C2D6"))
         };
 
+        var folderLabel = new TextBlock
+        {
+            Text = folder,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Foreground = new SolidColorBrush(Color.Parse("#8EA0BA")),
+            FontSize = 12
+        };
+
+        var folderPill = new Border
+        {
+            Background = new SolidColorBrush(Color.Parse("#101722")),
+            BorderBrush = new SolidColorBrush(Color.Parse("#29364A")),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(10, 7),
+            Margin = new Thickness(0, 8, 0, 0),
+            Child = folderLabel
+        };
+
+        var copy = new StackPanel
+        {
+            Spacing = 2,
+            Children = { message, folderPill }
+        };
+
+        var successBadge = new Border
+        {
+            Width = 54,
+            Height = 54,
+            CornerRadius = new CornerRadius(27),
+            Background = new SolidColorBrush(Color.Parse("#173525")),
+            BorderBrush = new SolidColorBrush(Color.Parse("#2A7B4A")),
+            BorderThickness = new Thickness(1),
+            Child = new TextBlock
+            {
+                Text = "✓",
+                FontSize = 28,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = new SolidColorBrush(Color.Parse("#6EE7A1")),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            }
+        };
+
+        var summary = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("Auto,*"),
+            ColumnSpacing = 14,
+            Children = { successBadge, copy }
+        };
+        Grid.SetColumn(copy, 1);
+
         var support = new TextBlock
         {
-            Text = "StreamWID is an independent tool. If it saves you editing time, even a small amount helps a lot in the development.",
+            Text = "StreamWID is independent. If it saved you editing time, a small contribution helps keep it moving.",
             TextWrapping = TextWrapping.Wrap,
-            TextAlignment = TextAlignment.Center,
+            FontSize = 13,
             Foreground = new SolidColorBrush(Color.Parse("#B8C2D6"))
         };
 
         var openFolderButton = new Button
         {
             Content = "Open Folder",
-            Width = 180,
-            MinHeight = 36,
-            Padding = new Thickness(14, 7),
-            Background = new SolidColorBrush(Color.Parse("#2A3447")),
-            Foreground = new SolidColorBrush(Color.Parse("#E5ECF7")),
-            BorderBrush = new SolidColorBrush(Color.Parse("#4B5C76")),
+            MinHeight = 40,
+            Padding = new Thickness(16, 8),
+            Background = new SolidColorBrush(Color.Parse("#D7E7FF")),
+            Foreground = new SolidColorBrush(Color.Parse("#0E1724")),
+            BorderBrush = new SolidColorBrush(Color.Parse("#D7E7FF")),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(6),
             Cursor = new Cursor(StandardCursorType.Hand),
             HorizontalContentAlignment = HorizontalAlignment.Center,
             VerticalContentAlignment = VerticalAlignment.Center
         };
-        openFolderButton.Click += (_, _) => OpenFolder(folder);
+        openFolderButton.Click += (_, _) =>
+        {
+            OpenFolder(folder);
+            ((Window)openFolderButton.GetVisualRoot()!).Close();
+        };
 
         var supportButton = new Button
         {
-            Content = "♥ Support Project",
-            Width = 180,
-            MinHeight = 36,
-            Padding = new Thickness(14, 7),
-            Background = new SolidColorBrush(Color.Parse("#2B2235")),
+            Content = "♥ Support",
+            Width = 110,
+            MinHeight = 34,
+            Padding = new Thickness(12, 6),
+            Background = new SolidColorBrush(Color.Parse("#2D2437")),
             Foreground = new SolidColorBrush(Color.Parse("#F3D9FF")),
-            BorderThickness = new Thickness(0),
+            BorderBrush = new SolidColorBrush(Color.Parse("#574166")),
+            BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(6),
             Cursor = new Cursor(StandardCursorType.Hand),
             HorizontalContentAlignment = HorizontalAlignment.Center,
@@ -488,37 +554,48 @@ public partial class MainWindow : Window
         };
         supportButton.Click += async (_, _) =>
         {
-            var launcher = TopLevel.GetTopLevel(this)?.Launcher;
-            if (launcher is not null)
-                await launcher.LaunchUriAsync(new Uri("https://www.paypal.com/donate/?hosted_button_id=ZKTLLYY9ADWYQ"));
+            try
+            {
+                var launcher = TopLevel.GetTopLevel(this)?.Launcher;
+                if (launcher is not null)
+                    await launcher.LaunchUriAsync(new Uri("https://www.paypal.com/donate/?hosted_button_id=ZKTLLYY9ADWYQ"));
+            }
+            finally
+            {
+                ((Window)supportButton.GetVisualRoot()!).Close();
+            }
         };
 
-        var orDelimiter = new TextBlock
+        var supportContent = new Grid
         {
-            Text = "OR",
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Foreground = new SolidColorBrush(Color.Parse("#7E8AA0")),
-            FontSize = 12,
-            FontWeight = FontWeight.SemiBold
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            ColumnSpacing = 12,
+            Children = { support, supportButton }
         };
+        Grid.SetColumn(supportButton, 1);
 
-        var actions = new StackPanel
+        var supportPanel = new Border
         {
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Spacing = 8,
-            Children = { supportButton, orDelimiter, openFolderButton }
+            Background = new SolidColorBrush(Color.Parse("#191D29")),
+            BorderBrush = new SolidColorBrush(Color.Parse("#2A3140")),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(12, 10),
+            Child = supportContent
         };
 
         var body = new StackPanel
         {
-            Spacing = 12,
-            Margin = new Thickness(18),
-            Children = { message, support, actions }
+            Spacing = 16,
+            Margin = new Thickness(22, 20, 22, 22),
+            Children = { summary, openFolderButton, supportPanel }
         };
 
         return new Border
         {
-            Background = new SolidColorBrush(Color.Parse("#151922")),
+            Background = new SolidColorBrush(Color.Parse("#141922")),
+            BorderBrush = new SolidColorBrush(Color.Parse("#2C3647")),
+            BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(10),
             ClipToBounds = true,
             Child = new StackPanel
