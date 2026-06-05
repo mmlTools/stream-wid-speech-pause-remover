@@ -1,22 +1,33 @@
-# Silence Cutter Timeline - Avalonia + FFmpeg
+# StreamWID
 
-A cross-platform desktop app that detects speech pauses in multiple video clips, shows an editable pause timeline, and exports:
+StreamWID is a desktop video utility for finding pauses in speech recordings, reviewing the result in an editor-style timeline, and exporting a cleaner cut.
 
-- a rendered cut video with selected pauses removed
-- pause-only clips
-- EDL pause markers for DaVinci Resolve
-- CSV cut list for debugging/post-processing
+It uses FFmpeg for analysis, preview generation, and export. The app is built with Avalonia and .NET 8.
 
-## Why this approach
+## Features
 
-DaVinci Resolve scripting can hit limitations in the free version. This app does the hard part outside Resolve by using FFmpeg's `silencedetect` filter, then lets you manually choose what to remove before exporting.
+- Add one or more video clips by browsing or drag and drop.
+- Analyze selected clips or all loaded clips.
+- Detect pause sections with FFmpeg `silencedetect`.
+- Use adaptive threshold suggestions or manual detection settings.
+- Review detected sections with video thumbnails in the timeline rail and section list.
+- Preview speech sections with synced frame preview and audio playback.
+- Click any section to mark it for removal or keep it.
+- Select or deselect all speech sections.
+- Select or deselect all pause sections.
+- Remove uploaded clips from the list with the clip context menu.
+- Export from a compact export menu:
+  - cut video
+  - pause-only clips
+  - EDL pause markers
+  - CSV cut list
 
 ## Requirements
 
 - .NET 8 SDK
-- FFmpeg, FFprobe, and FFplay installed and available in PATH
+- FFmpeg, FFprobe, and FFplay installed and available in `PATH`
 
-Check:
+Check your FFmpeg tools:
 
 ```bash
 ffmpeg -version
@@ -31,30 +42,39 @@ dotnet restore
 dotnet run
 ```
 
-## Suggested settings
+## Workflow
 
-For voice recordings:
+1. Add video clips with **Browse Clips** or drag files into the clip list.
+2. Pick a detection preset or adjust threshold, minimum pause, and padding.
+3. Click **Analyze Selected** or **Analyze All**.
+4. Review the preview, thumbnail timeline, and section list.
+5. Click section rows to toggle whether they will be cut.
+6. Use **Select All Speech** or **Select All Pauses** to quickly mark groups.
+7. Open **Export** and choose the output you need.
+
+## Detection Settings
+
+Good starting values for voice recordings:
 
 - Threshold: `-35 dB`
 - Minimum pause: `0.45s`
 - Padding: `0.08s`
 
-If it cuts breathing or quiet words, lower sensitivity by using `-30 dB` or increase minimum pause to `0.60s`.
-If it misses pauses, use `-40 dB` or lower minimum pause to `0.30s`.
+If quiet words are being removed, reduce sensitivity with a less negative threshold such as `-30 dB`, or increase minimum pause length.
 
-## Resolve workflow
+If pauses are missed, increase sensitivity with a more negative threshold such as `-40 dB`, or reduce minimum pause length.
 
-### Option A: Fastest
-Use **Export Cut Video** and import the rendered file into Resolve.
+## Export Notes
 
-### Option B: Review pauses in Resolve
-Use **Export EDL Markers** and import the EDL as markers. Depending on your Resolve version, import marker EDL from the timeline/media pool context menu.
+- **Export Cut Video** renders the selected clip without sections marked for removal.
+- **Export Pauses Only** exports removed pause sections as separate files.
+- **Export EDL Markers** creates pause markers for Resolve or similar workflows.
+- **Export CSV Cut List** writes section timing and removal state for review or post-processing.
+- Re-encoding is recommended for frame-accurate cuts.
+- Stream copy mode is faster, but cuts can land near keyframes instead of exact frames.
 
-### Option C: Manual/advanced
-Use **Export CSV Cut List**. It contains exact pause start/end times and whether each pause was marked for removal.
+## Current Scope
 
-## Notes
+The app exports one selected clip at a time. Batch export can be added later by iterating over analyzed clips.
 
-- Frame-accurate cutting usually requires re-encoding. Keep `Re-encode exports` enabled for reliable results.
-- Stream copy mode is faster, but cuts only around keyframes and can be slightly inaccurate.
-- The app currently processes one selected clip at a time for export. Multi-clip batch export can be added easily by iterating over analyzed clips.
+Future detection work can build on the same section removal model, including filler-word or hesitation detection such as "hmm" and "aaa".

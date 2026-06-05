@@ -5,7 +5,7 @@ using System.Reflection;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
-namespace SilenceCutter.Services;
+namespace StreamWID.Services;
 
 public sealed record UpdateInfo(string Version, string Url);
 
@@ -28,7 +28,7 @@ public sealed class UpdateChecker
     public async Task<UpdateInfo?> CheckLatestReleaseAsync(CancellationToken ct = default)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{_owner}/{_repo}/releases/latest");
-        request.Headers.UserAgent.Add(new ProductInfoHeaderValue("SilenceCutter", CurrentVersion.ToString()));
+        request.Headers.UserAgent.Add(new ProductInfoHeaderValue("StreamWID", CurrentVersion.ToString()));
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
 
         using var response = await Http.SendAsync(request, ct);
@@ -51,7 +51,7 @@ public sealed class UpdateChecker
 
     private static Version GetCurrentVersion()
     {
-        var environmentVersion = Environment.GetEnvironmentVariable("SILENCECUTTER_VERSION");
+        var environmentVersion = Environment.GetEnvironmentVariable("STREAMWID_VERSION");
         if (ParseVersion(environmentVersion) is { } versionFromEnvironment)
             return versionFromEnvironment;
 

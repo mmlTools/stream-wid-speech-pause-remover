@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 
-namespace SilenceCutter.Services;
+namespace StreamWID.Services;
 
 public sealed record ProcessResult(int ExitCode, string StdOut, string StdErr);
 

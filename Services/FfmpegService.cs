@@ -1,17 +1,19 @@
-using SilenceCutter.Models;
+using StreamWID.Models;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace SilenceCutter.Services;
+namespace StreamWID.Services;
 
 public sealed class FfmpegService
 {
     private static readonly Regex DurationRegex = new(@"Duration:\s(?<h>\d+):(?<m>\d+):(?<s>\d+(\.\d+)?)", RegexOptions.Compiled);
     private static readonly Regex SilenceStartRegex = new(@"silence_start:\s(?<v>[0-9\.]+)", RegexOptions.Compiled);
     private static readonly Regex SilenceEndRegex = new(@"silence_end:\s(?<v>[0-9\.]+)", RegexOptions.Compiled);
+    private static readonly Regex MeanVolumeRegex = new(@"mean_volume:\s*(?<v>-?\d+(\.\d+)?) dB", RegexOptions.Compiled);
+    private static readonly Regex MaxVolumeRegex = new(@"max_volume:\s*(?<v>-?\d+(\.\d+)?) dB", RegexOptions.Compiled);
 
     public string FfmpegPath { get; set; } = "ffmpeg";
     public string FfprobePath { get; set; } = "ffprobe";
@@ -44,10 +46,23 @@ public sealed class FfmpegService
         return int.Parse(m.Groups["h"].Value) * 3600 + int.Parse(m.Groups["m"].Value) * 60 + double.Parse(m.Groups["s"].Value, CultureInfo.InvariantCulture);
     }
 
-    public async Task<List<TimelineSegment>> DetectSegmentsAsync(string file, double thresholdDb, double minSilenceSeconds, double keepPaddingSeconds, CancellationToken ct = default)
+    public async Task<(List<TimelineSegment> Segments, double AdaptiveThresholdDb)> DetectSegmentsAsync(
+        string file,
+        double thresholdDb,
+        double minSilenceSeconds,
+        double keepPaddingSeconds,
+        bool useAdaptiveThreshold,
+        CancellationToken ct = default)
     {
+        var adaptiveThreshold = thresholdDb;
+        if (useAdaptiveThreshold)
+        {
+            adaptiveThreshold = await GetAdaptiveThresholdDbAsync(file, ct);
+            adaptiveThreshold = Math.Max(thresholdDb, adaptiveThreshold);
+        }
+
         var duration = await GetDurationAsync(file, ct);
-        var args = $"-hide_banner -i {Q(file)} -af silencedetect=noise={thresholdDb.ToString(CultureInfo.InvariantCulture)}dB:d={minSilenceSeconds.ToString(CultureInfo.InvariantCulture)} -f null -";
+        var args = $"-hide_banner -i {Q(file)} -af silencedetect=noise={adaptiveThreshold.ToString(CultureInfo.InvariantCulture)}dB:d={minSilenceSeconds.ToString(CultureInfo.InvariantCulture)} -f null -";
         var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct);
 
         var silenceRanges = new List<(double Start, double End)>();
@@ -71,12 +86,39 @@ public sealed class FfmpegService
             silenceRanges.Add((Math.Max(0, pendingStart.Value + keepPaddingSeconds), duration));
 
         silenceRanges = silenceRanges.Where(x => x.End > x.Start).OrderBy(x => x.Start).ToList();
-        return BuildFullTimeline(duration, silenceRanges);
+        return (BuildFullTimeline(duration, silenceRanges), adaptiveThreshold);
+    }
+
+    public async Task<double> GetAdaptiveThresholdDbAsync(string file, CancellationToken ct = default)
+    {
+        var result = await ProcessRunner.RunAsync(FfmpegPath, $"-hide_banner -i {Q(file)} -af volumedetect -f null -", ct);
+        var mean = MeanVolumeRegex.Match(result.StdErr);
+        var max = MaxVolumeRegex.Match(result.StdErr);
+
+        var meanValue = mean.Success ? Parse(mean.Groups["v"].Value) : -35;
+        var maxValue = max.Success ? Parse(max.Groups["v"].Value) : -1;
+
+        var suggested = Math.Clamp(meanValue - 14, -55, -18);
+        suggested = Math.Min(suggested, maxValue - 6);
+        return Math.Clamp(suggested, -55, -18);
+    }
+
+    public async Task<string?> ExtractClipThumbnailAsync(string inputFile, CancellationToken ct = default)
+    {
+        var tempFolder = Path.Combine(Path.GetTempPath(), "silence-cutter-thumbnails");
+        Directory.CreateDirectory(tempFolder);
+        var outputFile = Path.Combine(tempFolder, Path.GetFileNameWithoutExtension(inputFile) + "_thumb.jpg");
+        var args = $"-y -hide_banner -ss 2 -i {Q(inputFile)} -frames:v 1 -vf scale=220:-2 {Q(outputFile)}";
+        var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct);
+        if (result.ExitCode != 0 || !File.Exists(outputFile))
+            return null;
+
+        return outputFile;
     }
 
     public async Task ExportCutVideoAsync(string inputFile, IEnumerable<TimelineSegment> segments, string outputFile, bool reencode, CancellationToken ct = default)
     {
-        var keep = segments.Where(s => !(s.Kind == SegmentKind.Silence && s.Remove)).OrderBy(s => s.Start).ToList();
+        var keep = segments.Where(s => !s.Remove).OrderBy(s => s.Start).ToList();
         if (keep.Count == 0) throw new InvalidOperationException("No segments left to export.");
 
         if (reencode)
@@ -169,7 +211,7 @@ public sealed class FfmpegService
         Directory.CreateDirectory(outputFolder);
 
         var outputPattern = Path.Combine(outputFolder, "frame_%04d.jpg");
-        var args = $"-y -ss {F(segment.Start)} -i {Q(inputFile)} -t {F(segment.Duration)} -vf fps={fps},scale=960:-2 -q:v 3 {Q(outputPattern)}";
+        var args = $"-y -i {Q(inputFile)} -ss {F(segment.Start)} -t {F(segment.Duration)} -vf fps={fps},scale=960:-2 -q:v 3 {Q(outputPattern)}";
         var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct);
         if (result.ExitCode != 0)
             throw new InvalidOperationException(result.StdErr);
@@ -177,9 +219,47 @@ public sealed class FfmpegService
         return Directory.GetFiles(outputFolder, "frame_*.jpg").OrderBy(x => x).ToList();
     }
 
-    public Process StartSegmentAudioPlayback(string inputFile, TimelineSegment segment)
+    public async Task<IReadOnlyList<string>> ExtractSegmentThumbnailsAsync(
+        string inputFile,
+        TimelineSegment segment,
+        string outputFolder,
+        int count,
+        CancellationToken ct = default)
     {
-        var args = $"-nodisp -autoexit -loglevel quiet -ss {F(segment.Start)} -t {F(segment.Duration)} -i {Q(inputFile)}";
+        Directory.CreateDirectory(outputFolder);
+
+        count = Math.Clamp(count, 1, 10);
+        var fps = Math.Clamp(count / Math.Max(segment.Duration, 0.1), 0.15, 6);
+        var outputPattern = Path.Combine(outputFolder, "thumb_%03d.jpg");
+        var args = $"-y -hide_banner -i {Q(inputFile)} -ss {F(segment.Start)} -t {F(segment.Duration)} -vf fps={F(fps)},scale=120:68:force_original_aspect_ratio=increase,crop=120:68 -frames:v {count} -q:v 5 {Q(outputPattern)}";
+        var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(result.StdErr);
+
+        return Directory.GetFiles(outputFolder, "thumb_*.jpg").OrderBy(x => x).ToList();
+    }
+
+    public async Task<string> ExtractSegmentAudioPreviewAsync(
+        string inputFile,
+        TimelineSegment segment,
+        string outputFolder,
+        CancellationToken ct = default)
+    {
+        Directory.CreateDirectory(outputFolder);
+
+        var outputFile = Path.Combine(outputFolder, "preview-audio.wav");
+        var filter = $"atrim=start={F(segment.Start)}:end={F(segment.End)},asetpts=PTS-STARTPTS";
+        var args = $"-y -hide_banner -i {Q(inputFile)} -vn -af {Q(filter)} -ac 2 -ar 48000 -c:a pcm_s16le {Q(outputFile)}";
+        var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct);
+        if (result.ExitCode != 0 || !File.Exists(outputFile))
+            throw new InvalidOperationException(result.StdErr);
+
+        return outputFile;
+    }
+
+    public Process StartAudioPlayback(string audioFile)
+    {
+        var args = $"-nodisp -autoexit -loglevel quiet {Q(audioFile)}";
         var process = Process.Start(new ProcessStartInfo
         {
             FileName = FfplayPath,

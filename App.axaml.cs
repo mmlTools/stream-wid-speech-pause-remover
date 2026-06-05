@@ -1,10 +1,10 @@
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
-using SilenceCutter.ViewModels;
-using SilenceCutter.Views;
+using StreamWID.ViewModels;
+using StreamWID.Views;
 
-namespace SilenceCutter;
+namespace StreamWID;
 
 public partial class App : Application
 {

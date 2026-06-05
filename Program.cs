@@ -1,7 +1,7 @@
 using Avalonia;
 using System;
 
-namespace SilenceCutter;
+namespace StreamWID;
 
 internal static class Program
 {

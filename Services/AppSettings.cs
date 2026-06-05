@@ -1,13 +1,13 @@
 using System.Text.Json;
 
-namespace SilenceCutter.Services;
+namespace StreamWID.Services;
 
 public sealed class AppSettings
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private static readonly string SettingsFolder = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "SilenceCutter");
+        "StreamWID");
     private static readonly string SettingsPath = Path.Combine(SettingsFolder, "settings.json");
 
     public string? LastKnownVersion { get; set; }

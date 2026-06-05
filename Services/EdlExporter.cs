@@ -1,14 +1,14 @@
-using SilenceCutter.Models;
+using StreamWID.Models;
 using System.Text;
 
-namespace SilenceCutter.Services;
+namespace StreamWID.Services;
 
 public static class EdlExporter
 {
     public static async Task ExportPauseMarkersAsync(string path, MediaClip clip, double fps = 25)
     {
         var sb = new StringBuilder();
-        sb.AppendLine("TITLE: SILENCE CUTTER PAUSE MARKERS");
+        sb.AppendLine("TITLE: STREAMWID PAUSE MARKERS");
         sb.AppendLine("FCM: NON-DROP FRAME");
         sb.AppendLine();
 

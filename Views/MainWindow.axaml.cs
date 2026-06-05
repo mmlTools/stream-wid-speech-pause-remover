@@ -5,10 +5,10 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.VisualTree;
 using System.Diagnostics;
-using SilenceCutter.Models;
-using SilenceCutter.ViewModels;
+using StreamWID.Models;
+using StreamWID.ViewModels;
 
-namespace SilenceCutter.Views;
+namespace StreamWID.Views;
 
 public partial class MainWindow : Window
 {
@@ -59,6 +59,13 @@ public partial class MainWindow : Window
             await launcher.LaunchUriAsync(new Uri("https://www.paypal.com/donate/?hosted_button_id=ZKTLLYY9ADWYQ"));
     }
 
+    private async void LeaveReviewButton_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var launcher = TopLevel.GetTopLevel(this)?.Launcher;
+        if (launcher is not null)
+            await launcher.LaunchUriAsync(new Uri("https://streamwid.com/reviews/new"));
+    }
+
     private async void OpenLatestReleaseButton_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm || string.IsNullOrWhiteSpace(vm.LatestReleaseUrl))
@@ -91,7 +98,7 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
-    private void ClipsDropArea_Drop(object? sender, DragEventArgs e)
+    private async void ClipsDropArea_Drop(object? sender, DragEventArgs e)
     {
         if (DataContext is MainWindowViewModel vm)
         {
@@ -101,7 +108,7 @@ public partial class MainWindow : Window
                 .Cast<string>();
 
             if (paths is not null)
-                vm.AddClipPaths(paths);
+                await vm.AddClipPathsAsync(paths);
         }
 
         e.Handled = true;
@@ -143,6 +150,16 @@ public partial class MainWindow : Window
             ExecuteIfReady(vm.ExportCsvCommand);
     }
 
+    private void RemoveClipMenuItem_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is MainWindowViewModel vm &&
+            sender is MenuItem { Tag: MediaClip clip } &&
+            vm.RemoveClipCommand.CanExecute(clip))
+        {
+            vm.RemoveClipCommand.Execute(clip);
+        }
+    }
+
     private void TimelineTrackContainer_SizeChanged(object? sender, SizeChangedEventArgs e)
     {
         if (DataContext is MainWindowViewModel vm)
@@ -177,6 +194,21 @@ public partial class MainWindow : Window
         }
     }
 
+    private void SegmentRow_PointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+            return;
+
+        if (e.Source is Visual visual && visual.GetVisualAncestors().OfType<Button>().Any())
+            return;
+
+        if (sender is Border { Tag: TimelineSegment segment })
+        {
+            segment.Remove = !segment.Remove;
+            e.Handled = true;
+        }
+    }
+
     private void ResizeTop_PointerPressed(object? sender, PointerPressedEventArgs e) => BeginResize(WindowEdge.North, e);
     private void ResizeBottom_PointerPressed(object? sender, PointerPressedEventArgs e) => BeginResize(WindowEdge.South, e);
     private void ResizeLeft_PointerPressed(object? sender, PointerPressedEventArgs e) => BeginResize(WindowEdge.West, e);
@@ -200,8 +232,7 @@ public partial class MainWindow : Window
         {
             vm.ExportCompleted -= ViewModel_ExportCompleted;
             vm.FfmpegMissing -= ViewModel_FfmpegMissing;
-            if (vm.ClosePreviewCommand.CanExecute(null))
-                vm.ClosePreviewCommand.Execute(null);
+            vm.Shutdown();
         }
 
         base.OnClosed(e);
@@ -308,7 +339,7 @@ public partial class MainWindow : Window
 
         var message = new TextBlock
         {
-            Text = "Silence Cutter needs FFmpeg, FFprobe, and FFplay to analyze, preview, and export clips. Install FFmpeg and make sure it is available in PATH, then restart the app.",
+            Text = "StreamWID needs FFmpeg, FFprobe, and FFplay to analyze, preview, and export clips. Download FFmpeg, make sure it is available in PATH, then restart the app.",
             TextWrapping = TextWrapping.Wrap,
             Foreground = new SolidColorBrush(Color.Parse("#B8C2D6"))
         };
@@ -418,7 +449,7 @@ public partial class MainWindow : Window
 
         var support = new TextBlock
         {
-            Text = "Silence Cutter is an independent tool. If it saves you editing time, even a small amount helps a lot in the development.",
+            Text = "StreamWID is an independent tool. If it saves you editing time, even a small amount helps a lot in the development.",
             TextWrapping = TextWrapping.Wrap,
             TextAlignment = TextAlignment.Center,
             Foreground = new SolidColorBrush(Color.Parse("#B8C2D6"))

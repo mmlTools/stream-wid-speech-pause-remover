@@ -54,7 +54,7 @@ jobs:
         shell: pwsh
         run: |
           $preset = Get-Content presets.json | ConvertFrom-Json
-          $appName = if ($preset.appName) { $preset.appName } else { "SilenceCutter" }
+          $appName = if ($preset.appName) { $preset.appName } else { "StreamWID" }
           $version = $preset.version
 
           if (-not $version) {
@@ -74,13 +74,13 @@ jobs:
         run: dotnet --info
 
       - name: Restore
-        run: dotnet restore SilenceCutter.sln
+        run: dotnet restore StreamWID.sln
 
       - name: Build
-        run: dotnet build SilenceCutter.sln --configuration Release --no-restore /p:Version=${{ steps.presets.outputs.version }}
+        run: dotnet build StreamWID.sln --configuration Release --no-restore /p:Version=${{ steps.presets.outputs.version }}
 
       - name: Publish
-        run: dotnet publish SilenceCutter.csproj --configuration Release --runtime ${{ matrix.runtime }} --self-contained true --output artifacts/${{ matrix.runtime }} /p:Version=${{ steps.presets.outputs.version }}
+        run: dotnet publish StreamWID.csproj --configuration Release --runtime ${{ matrix.runtime }} --self-contained true --output artifacts/${{ matrix.runtime }} /p:Version=${{ steps.presets.outputs.version }}
 
       - name: Package Windows
         if: matrix.archive == 'zip'

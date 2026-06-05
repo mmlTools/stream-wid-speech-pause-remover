@@ -1,7 +1,8 @@
+using Avalonia.Media.Imaging;
 using CommunityToolkit.Mvvm.ComponentModel;
 using System.Collections.ObjectModel;
 
-namespace SilenceCutter.Models;
+namespace StreamWID.Models;
 
 public partial class MediaClip : ObservableObject
 {
@@ -11,4 +12,11 @@ public partial class MediaClip : ObservableObject
     [ObservableProperty] private ObservableCollection<TimelineSegment> segments = new();
     [ObservableProperty] private bool isAnalyzed;
     [ObservableProperty] private string status = "Waiting";
+    [ObservableProperty] private Bitmap? thumbnail;
+
+    partial void OnThumbnailChanged(Bitmap? oldValue, Bitmap? newValue)
+    {
+        if (!ReferenceEquals(oldValue, newValue))
+            oldValue?.Dispose();
+    }
 }

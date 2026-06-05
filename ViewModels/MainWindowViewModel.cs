@@ -1,24 +1,27 @@
 using Avalonia.Platform.Storage;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using SilenceCutter.Models;
-using SilenceCutter.Services;
+using StreamWID.Models;
+using StreamWID.Services;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 
-namespace SilenceCutter.ViewModels;
+namespace StreamWID.ViewModels;
+
+public sealed record DetectionPreset(string Name, double ThresholdDb, double MinSilenceSeconds, double KeepPaddingSeconds);
 
 public partial class MainWindowViewModel : ObservableObject
 {
     private readonly FfmpegService _ffmpeg = new();
-    private readonly UpdateChecker _updateChecker = new("mmlTools", "SilenceCutter");
+    private readonly UpdateChecker _updateChecker = new("mmlTools", "StreamWID");
     private readonly AppSettings _settings = AppSettings.Load();
     private readonly List<TimelineSegment> _watchedSegments = new();
     private readonly DispatcherTimer _previewTimer = new() { Interval = TimeSpan.FromMilliseconds(125) };
     private readonly List<string> _previewFrames = new();
     private CancellationTokenSource? _previewCts;
+    private CancellationTokenSource? _thumbnailCts;
     private Process? _previewAudioProcess;
     private string? _previewFolder;
     private int _previewFrameIndex;
@@ -35,6 +38,7 @@ public partial class MainWindowViewModel : ObservableObject
     public ObservableCollection<MediaClip> Clips { get; } = new();
     public ObservableCollection<string> Toasts { get; } = new();
     public ObservableCollection<TimelineSegmentBlock> TimelineBlocks { get; } = new();
+    public List<DetectionPreset> DetectionPresets { get; } = new();
 
     public event Action<string>? ExportCompleted;
     public event Action? FfmpegMissing;
@@ -44,6 +48,12 @@ public partial class MainWindowViewModel : ObservableObject
     [ObservableProperty] private double minSilenceSeconds = 0.45;
     [ObservableProperty] private double keepPaddingSeconds = 0.08;
     [ObservableProperty] private double resolveFps = 25;
+    [ObservableProperty] private bool useAdaptiveThreshold = true;
+    [ObservableProperty] private double adaptiveThresholdDb;
+    [ObservableProperty] private DetectionPreset? selectedDetectionPreset;
+
+    private readonly Dictionary<string, (DateTime LastWriteTimeUtc, List<TimelineSegment> Segments, double ThresholdDb, double MinSilenceSeconds, double KeepPaddingSeconds, bool UseAdaptiveThreshold)> _analysisCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _analysisSemaphore = new(2);
     [ObservableProperty] private string status = "Add clips to begin.";
     [ObservableProperty] private bool reencodeExports = true;
     [ObservableProperty] private bool isPreviewOpen;
@@ -57,6 +67,13 @@ public partial class MainWindowViewModel : ObservableObject
 
     public MainWindowViewModel()
     {
+        DetectionPresets.Add(new DetectionPreset("Podcast / Voice", -35, 0.45, 0.08));
+        DetectionPresets.Add(new DetectionPreset("Interview", -33, 0.35, 0.10));
+        DetectionPresets.Add(new DetectionPreset("Lecture / Presentation", -38, 0.55, 0.12));
+        DetectionPresets.Add(new DetectionPreset("Stream / Gameplay", -28, 0.80, 0.10));
+
+        SelectedDetectionPreset = DetectionPresets.FirstOrDefault();
+        AdaptiveThresholdDb = ThresholdDb;
         _previewTimer.Tick += (_, _) => AdvancePreviewFrame();
     }
 
@@ -75,9 +92,10 @@ public partial class MainWindowViewModel : ObservableObject
         }
     }
 
-    public void AddClipPaths(IEnumerable<string> paths)
+    public async Task AddClipPathsAsync(IEnumerable<string> paths)
     {
         var added = 0;
+        var newClips = new List<MediaClip>();
 
         foreach (var path in paths)
         {
@@ -90,7 +108,16 @@ public partial class MainWindowViewModel : ObservableObject
             if (Clips.Any(x => string.Equals(x.FilePath, path, StringComparison.OrdinalIgnoreCase)))
                 continue;
 
-            Clips.Add(new MediaClip { FilePath = path, FileName = Path.GetFileName(path) });
+            var clip = new MediaClip
+            {
+                FilePath = path,
+                FileName = Path.GetFileName(path),
+                Status = "Waiting",
+                DurationSeconds = 0
+            };
+
+            Clips.Add(clip);
+            newClips.Add(clip);
             added++;
         }
 
@@ -98,6 +125,22 @@ public partial class MainWindowViewModel : ObservableObject
 
         if (added > 0)
             Status = added == 1 ? "Added 1 clip." : $"Added {added} clips.";
+
+        await Task.WhenAll(newClips.Select(LoadClipThumbnailAsync));
+    }
+
+    private async Task LoadClipThumbnailAsync(MediaClip clip)
+    {
+        try
+        {
+            var path = await _ffmpeg.ExtractClipThumbnailAsync(clip.FilePath);
+            if (!string.IsNullOrWhiteSpace(path))
+                clip.Thumbnail = new Bitmap(path);
+        }
+        catch
+        {
+            // Thumbnail is optional.
+        }
     }
 
     public void SetTimelineTrackWidth(double width)
@@ -109,22 +152,43 @@ public partial class MainWindowViewModel : ObservableObject
         RefreshTimelineBlocks();
     }
 
-    public bool AllPausesSelected
+    public bool AllSectionsSelected
     {
         get
         {
-            var pauses = SelectedClip?.Segments.Where(x => x.Kind == SegmentKind.Silence).ToList();
-            return pauses?.Count > 0 && pauses.All(x => x.Remove);
+            var sections = SelectedClip?.Segments.ToList();
+            return sections?.Count > 0 && sections.All(x => x.Remove);
         }
         set
         {
             if (SelectedClip is null)
                 return;
 
-            foreach (var segment in SelectedClip.Segments.Where(x => x.Kind == SegmentKind.Silence))
+            foreach (var segment in SelectedClip.Segments)
                 segment.Remove = value;
 
-            OnPropertyChanged();
+            NotifySelectionStateChanged();
+        }
+    }
+
+    public string ToggleAllSpeechLabel => AreAllSpeechSectionsRemoved ? "Deselect All Speech" : "Select All Speech";
+    public string ToggleAllPausesLabel => AreAllPauseSectionsRemoved ? "Deselect All Pauses" : "Select All Pauses";
+
+    private bool AreAllSpeechSectionsRemoved
+    {
+        get
+        {
+            var speech = SelectedClip?.Segments.Where(x => x.Kind == SegmentKind.Speech).ToList();
+            return speech?.Count > 0 && speech.All(x => x.Remove);
+        }
+    }
+
+    private bool AreAllPauseSectionsRemoved
+    {
+        get
+        {
+            var pauses = SelectedClip?.Segments.Where(x => x.Kind == SegmentKind.Silence).ToList();
+            return pauses?.Count > 0 && pauses.All(x => x.Remove);
         }
     }
 
@@ -132,7 +196,25 @@ public partial class MainWindowViewModel : ObservableObject
     {
         WatchPauseSelection(value);
         RefreshTimelineBlocks();
-        OnPropertyChanged(nameof(AllPausesSelected));
+        _ = LoadTimelineThumbnailsAsync(value);
+        NotifySelectionStateChanged();
+    }
+
+    partial void OnSelectedDetectionPresetChanged(DetectionPreset? value)
+    {
+        if (value is null)
+            return;
+
+        ThresholdDb = value.ThresholdDb;
+        MinSilenceSeconds = value.MinSilenceSeconds;
+        KeepPaddingSeconds = value.KeepPaddingSeconds;
+    }
+
+    partial void OnUseAdaptiveThresholdChanged(bool value)
+    {
+        _ = ShowToastAsync(value
+            ? $"Adaptive threshold enabled. Suggestions will be applied from audio analysis."
+            : "Adaptive threshold disabled. Manual threshold will be used.");
     }
 
     partial void OnStatusChanged(string value)
@@ -159,7 +241,7 @@ public partial class MainWindowViewModel : ObservableObject
             LatestVersion = update.Version;
             LatestReleaseUrl = update.Url;
             IsUpdateAvailable = true;
-            Status = $"Silence Cutter {update.Version} is available.";
+            Status = $"StreamWID {update.Version} is available.";
         }
         catch (Exception ex)
         {
@@ -178,7 +260,7 @@ public partial class MainWindowViewModel : ObservableObject
             FileTypeFilter = new[] { new FilePickerFileType("Video files") { Patterns = new[] { "*.mp4", "*.mov", "*.mkv", "*.webm", "*.avi" } } }
         });
 
-        AddClipPaths(files.Select(f => f.TryGetLocalPath()).OfType<string>());
+        await AddClipPathsAsync(files.Select(f => f.TryGetLocalPath()).OfType<string>());
     }
 
     [RelayCommand]
@@ -191,40 +273,87 @@ public partial class MainWindowViewModel : ObservableObject
     [RelayCommand]
     private async Task AnalyzeAllAsync()
     {
-        foreach (var clip in Clips) await AnalyzeClip(clip);
+        var analysisTasks = Clips.Select(async clip =>
+        {
+            await _analysisSemaphore.WaitAsync();
+            try
+            {
+                await AnalyzeClip(clip);
+            }
+            finally
+            {
+                _analysisSemaphore.Release();
+            }
+        });
+
+        await Task.WhenAll(analysisTasks);
     }
 
     [RelayCommand]
-    private void MarkAllPausesForRemoval()
+    private void ToggleAllSpeech()
     {
-        if (SelectedClip is null) return;
-        foreach (var s in SelectedClip.Segments.Where(x => x.Kind == SegmentKind.Silence)) s.Remove = true;
+        if (SelectedClip is null)
+            return;
+
+        var remove = !AreAllSpeechSectionsRemoved;
+        foreach (var s in SelectedClip.Segments.Where(x => x.Kind == SegmentKind.Speech))
+            s.Remove = remove;
+
+        NotifySelectionStateChanged();
     }
 
     [RelayCommand]
-    private void KeepAllPauses()
+    private void ToggleAllPauses()
     {
-        if (SelectedClip is null) return;
-        foreach (var s in SelectedClip.Segments.Where(x => x.Kind == SegmentKind.Silence)) s.Remove = false;
+        if (SelectedClip is null)
+            return;
+
+        var remove = !AreAllPauseSectionsRemoved;
+        foreach (var s in SelectedClip.Segments.Where(x => x.Kind == SegmentKind.Silence))
+            s.Remove = remove;
+
+        NotifySelectionStateChanged();
+    }
+
+    [RelayCommand]
+    private void RemoveClip(MediaClip clip)
+    {
+        if (!Clips.Contains(clip))
+            return;
+
+        if (ReferenceEquals(SelectedClip, clip))
+            ClosePreview();
+
+        ClearSegmentThumbnails(clip.Segments);
+        clip.Thumbnail = null;
+
+        Clips.Remove(clip);
+        SelectedClip = Clips.FirstOrDefault();
+        Status = $"Removed {clip.FileName} from the list.";
     }
 
     [RelayCommand]
     private async Task PlaySegmentAsync(TimelineSegment segment)
     {
-        if (SelectedClip is null || segment.Kind != SegmentKind.Speech) return;
+        if (segment.Kind != SegmentKind.Speech)
+            return;
+
+        var clip = Clips.FirstOrDefault(c => c.Segments.Contains(segment));
+        if (clip is null)
+            return;
 
         try
         {
             ClosePreview();
-            PreviewTitle = SelectedClip.FileName;
+            PreviewTitle = clip.FileName;
             PreviewDetails = $"{TimelineSegment.TimeFmt(segment.Start)} - {TimelineSegment.TimeFmt(segment.End)} ({segment.Duration:0.00}s)";
             IsPreviewOpen = true;
             IsPreviewLoading = true;
-            Status = $"Playing {TimelineSegment.TimeFmt(segment.Start)} - {TimelineSegment.TimeFmt(segment.End)} from {SelectedClip.FileName}.";
+            Status = $"Playing {TimelineSegment.TimeFmt(segment.Start)} - {TimelineSegment.TimeFmt(segment.End)} from {clip.FileName}.";
 
             _previewCts = new CancellationTokenSource();
             _previewFolder = Path.Combine(Path.GetTempPath(), "silence-cutter-preview-" + Guid.NewGuid().ToString("N"));
-            var frames = await _ffmpeg.ExtractPreviewFramesAsync(SelectedClip.FilePath, segment, _previewFolder, ct: _previewCts.Token);
+            var frames = await _ffmpeg.ExtractPreviewFramesAsync(clip.FilePath, segment, _previewFolder, ct: _previewCts.Token);
 
             _previewFrames.Clear();
             _previewFrames.AddRange(frames);
@@ -233,7 +362,8 @@ public partial class MainWindowViewModel : ObservableObject
             if (_previewFrames.Count > 0)
             {
                 SetPreviewFrame(_previewFrames[0]);
-                _previewAudioProcess = _ffmpeg.StartSegmentAudioPlayback(SelectedClip.FilePath, segment);
+                var audioFile = await _ffmpeg.ExtractSegmentAudioPreviewAsync(clip.FilePath, segment, _previewFolder, _previewCts.Token);
+                _previewAudioProcess = _ffmpeg.StartAudioPlayback(audioFile);
                 _previewTimer.Start();
             }
 
@@ -269,6 +399,14 @@ public partial class MainWindowViewModel : ObservableObject
             try { Directory.Delete(_previewFolder, true); } catch { }
             _previewFolder = null;
         }
+    }
+
+    public void Shutdown()
+    {
+        _thumbnailCts?.Cancel();
+        _thumbnailCts?.Dispose();
+        _thumbnailCts = null;
+        ClosePreview();
     }
 
     [RelayCommand]
@@ -358,16 +496,52 @@ public partial class MainWindowViewModel : ObservableObject
         {
             clip.Status = "Analyzing...";
             Status = $"Analyzing {clip.FileName}...";
-            var segments = await _ffmpeg.DetectSegmentsAsync(clip.FilePath, ThresholdDb, MinSilenceSeconds, KeepPaddingSeconds);
-            clip.Segments = new ObservableCollection<TimelineSegment>(segments);
-            clip.DurationSeconds = segments.Sum(s => s.Duration);
+
+            var cacheKey = string.Join("|", clip.FilePath, ThresholdDb, MinSilenceSeconds, KeepPaddingSeconds, UseAdaptiveThreshold);
+            var fileWriteTime = File.GetLastWriteTimeUtc(clip.FilePath);
+            if (_analysisCache.TryGetValue(cacheKey, out var cached) && cached.LastWriteTimeUtc == fileWriteTime)
+            {
+                var cachedSegments = cached.Segments.Select(s => new TimelineSegment
+                {
+                    Kind = s.Kind,
+                    Start = s.Start,
+                    End = s.End,
+                    Remove = s.Remove
+                }).ToList();
+
+                ClearSegmentThumbnails(clip.Segments);
+                clip.Segments = new ObservableCollection<TimelineSegment>(cachedSegments);
+                clip.DurationSeconds = cachedSegments.Sum(s => s.Duration);
+                AdaptiveThresholdDb = cached.ThresholdDb;
+            }
+            else
+            {
+                var result = await _ffmpeg.DetectSegmentsAsync(clip.FilePath, ThresholdDb, MinSilenceSeconds, KeepPaddingSeconds, UseAdaptiveThreshold);
+                AdaptiveThresholdDb = result.AdaptiveThresholdDb;
+                var resultSegments = result.Segments.Select(s => new TimelineSegment
+                {
+                    Kind = s.Kind,
+                    Start = s.Start,
+                    End = s.End,
+                    Remove = s.Remove
+                }).ToList();
+
+                ClearSegmentThumbnails(clip.Segments);
+                clip.Segments = new ObservableCollection<TimelineSegment>(resultSegments);
+                clip.DurationSeconds = resultSegments.Sum(s => s.Duration);
+                _analysisCache[cacheKey] = (fileWriteTime, resultSegments, ThresholdDb, MinSilenceSeconds, KeepPaddingSeconds, UseAdaptiveThreshold);
+            }
+
             clip.IsAnalyzed = true;
-            clip.Status = $"{segments.Count(s => s.Kind == SegmentKind.Silence)} pauses found";
+            clip.Status = $"{clip.Segments.Count(s => s.Kind == SegmentKind.Silence)} pauses found";
             if (ReferenceEquals(clip, SelectedClip))
                 WatchPauseSelection(clip);
             if (ReferenceEquals(clip, SelectedClip))
+            {
                 RefreshTimelineBlocks();
-            OnPropertyChanged(nameof(AllPausesSelected));
+                _ = LoadTimelineThumbnailsAsync(clip);
+            }
+            NotifySelectionStateChanged();
             Status = clip.Status;
         }
         catch (Exception ex)
@@ -385,6 +559,9 @@ public partial class MainWindowViewModel : ObservableObject
 
     private async Task ShowToastAsync(string message)
     {
+        if (message.Length > 180)
+            message = message[..177] + "...";
+
         Toasts.Add(message);
         while (Toasts.Count > 3)
             Toasts.RemoveAt(0);
@@ -420,7 +597,7 @@ public partial class MainWindowViewModel : ObservableObject
         if (clip is null)
             return;
 
-        foreach (var segment in clip.Segments.Where(x => x.Kind == SegmentKind.Silence))
+        foreach (var segment in clip.Segments)
         {
             segment.PropertyChanged += Segment_PropertyChanged;
             _watchedSegments.Add(segment);
@@ -432,8 +609,15 @@ public partial class MainWindowViewModel : ObservableObject
         if (e.PropertyName == nameof(TimelineSegment.Remove))
         {
             RefreshTimelineBlocks();
-            OnPropertyChanged(nameof(AllPausesSelected));
+            NotifySelectionStateChanged();
         }
+    }
+
+    private void NotifySelectionStateChanged()
+    {
+        OnPropertyChanged(nameof(AllSectionsSelected));
+        OnPropertyChanged(nameof(ToggleAllSpeechLabel));
+        OnPropertyChanged(nameof(ToggleAllPausesLabel));
     }
 
     private void RefreshTimelineBlocks()
@@ -454,6 +638,86 @@ public partial class MainWindowViewModel : ObservableObject
                 Segment = segment,
                 Width = Math.Max(8, segment.Duration / duration * _timelineTrackWidth)
             });
+        }
+    }
+
+    private static void ClearSegmentThumbnails(IEnumerable<TimelineSegment> segments)
+    {
+        foreach (var segment in segments)
+            segment.ClearThumbnails();
+    }
+
+    private async Task LoadTimelineThumbnailsAsync(MediaClip? clip)
+    {
+        _thumbnailCts?.Cancel();
+        _thumbnailCts?.Dispose();
+        _thumbnailCts = null;
+
+        if (clip is null || clip.Segments.Count == 0)
+            return;
+
+        foreach (var segment in clip.Segments)
+            segment.ClearThumbnails();
+
+        var cts = new CancellationTokenSource();
+        _thumbnailCts = cts;
+        var folder = Path.Combine(Path.GetTempPath(), "silence-cutter-track-" + Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            Status = "Building thumbnail track...";
+            var duration = Math.Max(clip.Segments.Sum(x => x.Duration), 0.1);
+            var failedThumbnailCount = 0;
+
+            for (var i = 0; i < clip.Segments.Count; i++)
+            {
+                cts.Token.ThrowIfCancellationRequested();
+                var segment = clip.Segments[i];
+                var segmentWidth = segment.Duration / duration * _timelineTrackWidth;
+                var thumbnailCount = Math.Clamp((int)Math.Ceiling(segmentWidth / 72), 1, 8);
+                var segmentFolder = Path.Combine(folder, i.ToString("0000"));
+
+                IReadOnlyList<string> paths;
+                try
+                {
+                    paths = await _ffmpeg.ExtractSegmentThumbnailsAsync(clip.FilePath, segment, segmentFolder, thumbnailCount, cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    failedThumbnailCount++;
+                    Debug.WriteLine($"Thumbnail extraction failed for {clip.FileName} segment {i} ({TimelineSegment.TimeFmt(segment.Start)} - {TimelineSegment.TimeFmt(segment.End)}): {ex}");
+                    continue;
+                }
+
+                await Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    if (cts.IsCancellationRequested || !ReferenceEquals(clip, SelectedClip))
+                        return;
+
+                    foreach (var path in paths)
+                        segment.Thumbnails.Add(new Bitmap(path));
+                });
+            }
+
+            if (!cts.IsCancellationRequested && ReferenceEquals(clip, SelectedClip))
+                Status = failedThumbnailCount == 0
+                    ? "Thumbnail track ready."
+                    : "Some timeline thumbnails could not be created.";
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            if (!HandleMissingFfmpeg(ex))
+            {
+                Debug.WriteLine($"Thumbnail track failed for {clip.FileName}: {ex}");
+                Status = "Timeline thumbnails could not be created.";
+            }
         }
     }
 
