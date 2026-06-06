@@ -11,6 +11,17 @@
     <ApplicationIcon>Assets\Icons\app-icon.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="artifacts\**\*.cs" />
+    <Compile Remove="obj\**\*.cs" />
+    <Compile Remove="Tests\**\*.cs" />
+    <EmbeddedResource Remove="artifacts\**" />
+    <EmbeddedResource Remove="obj\**" />
+    <EmbeddedResource Remove="Tests\**" />
+    <None Remove="artifacts\**" />
+    <None Remove="obj\**" />
+    <None Remove="Tests\**" />
+  </ItemGroup>
+  <ItemGroup>
     <Content Include="Assets\Icons\app-icon.ico" />
   </ItemGroup>
   <ItemGroup>

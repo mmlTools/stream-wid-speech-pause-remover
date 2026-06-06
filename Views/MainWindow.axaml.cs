@@ -194,6 +194,15 @@ public partial class MainWindow : Window
         }
     }
 
+    private void DismissToastButton_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is MainWindowViewModel vm &&
+            sender is Button { Tag: string message })
+        {
+            vm.DismissToast(message);
+        }
+    }
+
     private void SegmentRow_PointerPressed(object? sender, PointerPressedEventArgs e)
     {
         if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)

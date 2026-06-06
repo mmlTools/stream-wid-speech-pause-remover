@@ -5,26 +5,22 @@ namespace StreamWID.Services;
 
 public static class EdlExporter
 {
-    public static async Task ExportPauseMarkersAsync(string path, MediaClip clip, double fps = 25)
+    public static async Task ExportCutListEdlAsync(string path, MediaClip clip, double fps = 25)
     {
         var sb = new StringBuilder();
         sb.AppendLine("TITLE: STREAMWID CUT LIST");
         sb.AppendLine("FCM: NON-DROP FRAME");
         sb.AppendLine();
 
-        var keepSegments = BuildKeepSegments(clip);
-        var recordCursor = 0d;
+        var cutSegments = BuildMarkedForCutSegments(clip);
         var index = 1;
 
-        foreach (var s in keepSegments)
+        foreach (var segment in cutSegments)
         {
-            var recordStart = recordCursor;
-            var recordEnd = recordCursor + s.Duration;
-            sb.AppendLine($"{index:000}  AX       V     C        {Tc(s.Start, fps)} {Tc(s.End, fps)} {Tc(recordStart, fps)} {Tc(recordEnd, fps)}");
+            sb.AppendLine($"{index:000}  AX       V     C        {Tc(segment.Start, fps)} {Tc(segment.End, fps)} {Tc(segment.Start, fps)} {Tc(segment.End, fps)}");
             sb.AppendLine($"* FROM CLIP NAME: {clip.FileName}");
-            sb.AppendLine($"* KEEP speech {Tc(s.Start, fps)} -> {Tc(s.End, fps)}");
+            sb.AppendLine($"* MARKED FOR CUT {segment.Kind} {Tc(segment.Start, fps)} -> {Tc(segment.End, fps)}");
             sb.AppendLine();
-            recordCursor = recordEnd;
             index++;
         }
 
@@ -38,29 +34,56 @@ public static class EdlExporter
         await File.WriteAllLinesAsync(path, lines);
     }
 
-    private static IReadOnlyList<TimelineSegment> BuildKeepSegments(MediaClip clip)
+    internal static IReadOnlyList<TimelineSegment> BuildMarkedForCutSegments(MediaClip clip)
     {
-        var duration = clip.DurationSeconds > 0 ? clip.DurationSeconds : clip.Segments.Max(s => s.End);
-        var removed = clip.Segments
-            .Where(s => s.Kind == SegmentKind.Silence && s.Remove)
+        var duration = clip.DurationSeconds > 0
+            ? clip.DurationSeconds
+            : clip.Segments.Select(s => s.End).DefaultIfEmpty(0).Max();
+
+        if (duration <= 0)
+            return [];
+
+        var marked = clip.Segments
+            .Where(s => s.Remove)
+            .Where(s => s.End > s.Start)
+            .Select(s => new TimelineSegment
+            {
+                Kind = s.Kind,
+                Start = Math.Clamp(s.Start, 0, duration),
+                End = Math.Clamp(s.End, 0, duration)
+            })
+            .Where(s => s.End > s.Start)
             .OrderBy(s => s.Start)
             .ToList();
 
-        var keep = new List<TimelineSegment>();
-        var cursor = 0d;
+        return MergeMarkedSegments(marked);
+    }
 
-        foreach (var segment in removed)
+    private static IReadOnlyList<TimelineSegment> MergeMarkedSegments(IReadOnlyList<TimelineSegment> marked)
+    {
+        var merged = new List<TimelineSegment>();
+
+        foreach (var segment in marked)
         {
-            if (segment.Start > cursor)
-                keep.Add(new TimelineSegment { Kind = SegmentKind.Speech, Start = cursor, End = segment.Start });
+            var last = merged.LastOrDefault();
+            if (last is null || segment.Start > last.End)
+            {
+                merged.Add(segment);
+                continue;
+            }
 
-            cursor = Math.Max(cursor, segment.End);
+            if (segment.End > last.End)
+            {
+                merged[^1] = new TimelineSegment
+                {
+                    Kind = last.Kind == segment.Kind ? last.Kind : SegmentKind.Silence,
+                    Start = last.Start,
+                    End = segment.End
+                };
+            }
         }
 
-        if (cursor < duration)
-            keep.Add(new TimelineSegment { Kind = SegmentKind.Speech, Start = cursor, End = duration });
-
-        return keep.Where(s => s.End > s.Start).ToList();
+        return merged;
     }
 
     private static string Tc(double seconds, double fps)

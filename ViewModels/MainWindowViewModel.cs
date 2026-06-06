@@ -468,7 +468,7 @@ public partial class MainWindowViewModel : ObservableObject
         });
         var path = file?.TryGetLocalPath();
         if (string.IsNullOrWhiteSpace(path)) return;
-        await EdlExporter.ExportPauseMarkersAsync(path, SelectedClip, ResolveFps);
+        await EdlExporter.ExportCutListEdlAsync(path, SelectedClip, ResolveFps);
         Status = "Exported EDL cut list.";
         NotifyExportCompleted(path);
     }
@@ -568,6 +568,12 @@ public partial class MainWindowViewModel : ObservableObject
 
         await Task.Delay(4200);
         await Dispatcher.UIThread.InvokeAsync(() => Toasts.Remove(message));
+    }
+
+    public void DismissToast(string message)
+    {
+        if (!string.IsNullOrWhiteSpace(message))
+            Toasts.Remove(message);
     }
 
     private void NotifyExportCompleted(string path)

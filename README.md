@@ -19,7 +19,7 @@ It uses FFmpeg for analysis, preview generation, and export. The app is built wi
 - Export from a compact export menu:
   - cut video
   - pause-only clips
-  - EDL pause markers
+  - EDL cut list
   - CSV cut list
 
 ## Requirements
@@ -68,7 +68,7 @@ If pauses are missed, increase sensitivity with a more negative threshold such a
 
 - **Export Cut Video** renders the selected clip without sections marked for removal.
 - **Export Pauses Only** exports removed pause sections as separate files.
-- **Export EDL Markers** creates pause markers for Resolve or similar workflows.
+- **Export EDL Cut List** creates a video-only edit decision list that marks selected sections at their original timeline positions for Resolve or similar workflows.
 - **Export CSV Cut List** writes section timing and removal state for review or post-processing.
 - Re-encoding is recommended for frame-accurate cuts.
 - Stream copy mode is faster, but cuts can land near keyframes instead of exact frames.
