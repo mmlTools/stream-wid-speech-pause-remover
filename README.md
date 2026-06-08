@@ -16,6 +16,7 @@ It uses FFmpeg for analysis, preview generation, and export. The app is built wi
 - Select or deselect all speech sections.
 - Select or deselect all pause sections.
 - Remove uploaded clips from the list with the clip context menu.
+- Queue long cut-video and pause-only exports while continuing to review other clips.
 - Export from a compact export menu:
   - cut video
   - pause-only clips
@@ -68,6 +69,7 @@ If pauses are missed, increase sensitivity with a more negative threshold such a
 
 - **Export Cut Video** renders the selected clip without sections marked for removal.
 - **Export Pauses Only** exports removed pause sections as separate files.
+- Cut-video and pause-only exports are added to the export queue, so the selected clip's cut decisions are captured and rendered in the background.
 - **Export EDL Cut List** creates a video-only edit decision list that marks selected sections at their original timeline positions for Resolve or similar workflows.
 - **Export CSV Cut List** writes section timing and removal state for review or post-processing.
 - Re-encoding is recommended for frame-accurate cuts.
@@ -75,6 +77,6 @@ If pauses are missed, increase sensitivity with a more negative threshold such a
 
 ## Current Scope
 
-The app exports one selected clip at a time. Batch export can be added later by iterating over analyzed clips.
+The app queues long media exports one job at a time while keeping the editor available for the next clip.
 
 Future detection work can build on the same section removal model, including filler-word or hesitation detection such as "hmm" and "aaa".

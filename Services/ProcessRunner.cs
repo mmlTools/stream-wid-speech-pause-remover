@@ -7,7 +7,12 @@ public sealed record ProcessResult(int ExitCode, string StdOut, string StdErr);
 
 public static class ProcessRunner
 {
-    public static async Task<ProcessResult> RunAsync(string exe, string args, CancellationToken ct = default)
+    public static async Task<ProcessResult> RunAsync(
+        string exe,
+        string args,
+        CancellationToken ct = default,
+        Action<string>? onStdOutLine = null,
+        Action<string>? onStdErrLine = null)
     {
         var psi = new ProcessStartInfo
         {
@@ -24,8 +29,22 @@ public static class ProcessRunner
         using var p = new Process { StartInfo = psi };
         var stdout = new StringBuilder();
         var stderr = new StringBuilder();
-        p.OutputDataReceived += (_, e) => { if (e.Data != null) stdout.AppendLine(e.Data); };
-        p.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
+        p.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data is null)
+                return;
+
+            stdout.AppendLine(e.Data);
+            onStdOutLine?.Invoke(e.Data);
+        };
+        p.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data is null)
+                return;
+
+            stderr.AppendLine(e.Data);
+            onStdErrLine?.Invoke(e.Data);
+        };
 
         p.Start();
         p.BeginOutputReadLine();

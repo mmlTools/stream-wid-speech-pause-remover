@@ -14,10 +14,25 @@ public sealed record DetectionPreset(string Name, double ThresholdDb, double Min
 
 public partial class MainWindowViewModel : ObservableObject
 {
+    private enum ExportJobKind
+    {
+        CutVideo,
+        PausesOnly
+    }
+
+    private sealed record ExportJob(
+        ExportJobKind Kind,
+        string InputFile,
+        string OutputPath,
+        bool Reencode,
+        IReadOnlyList<TimelineSegment> Segments,
+        ExportQueueItem QueueItem);
+
     private readonly FfmpegService _ffmpeg = new();
     private readonly UpdateChecker _updateChecker = new("mmlTools", "StreamWID");
     private readonly AppSettings _settings = AppSettings.Load();
     private readonly List<TimelineSegment> _watchedSegments = new();
+    private readonly SemaphoreSlim _exportSemaphore = new(1, 1);
     private readonly DispatcherTimer _previewTimer = new() { Interval = TimeSpan.FromMilliseconds(125) };
     private readonly List<string> _previewFrames = new();
     private CancellationTokenSource? _previewCts;
@@ -37,6 +52,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     public ObservableCollection<MediaClip> Clips { get; } = new();
     public ObservableCollection<string> Toasts { get; } = new();
+    public ObservableCollection<ExportQueueItem> ExportQueue { get; } = new();
     public ObservableCollection<TimelineSegmentBlock> TimelineBlocks { get; } = new();
     public List<DetectionPreset> DetectionPresets { get; } = new();
 
@@ -64,6 +80,11 @@ public partial class MainWindowViewModel : ObservableObject
     [ObservableProperty] private bool isUpdateAvailable;
     [ObservableProperty] private string latestVersion = "";
     [ObservableProperty] private string latestReleaseUrl = "";
+
+    public string ExportQueueCountText => ExportQueue.Count.ToString();
+    public bool HasQueuedExports => ExportQueue.Count > 0;
+    public int ActiveExportCount => ExportQueue.Count(x => x.Status is "Queued" or "Exporting");
+    public bool HasActiveExports => ActiveExportCount > 0;
 
     public MainWindowViewModel()
     {
@@ -413,47 +434,42 @@ public partial class MainWindowViewModel : ObservableObject
     private async Task ExportCutVideoAsync()
     {
         if (SelectedClip is null || StorageProvider is null) return;
+        var clip = SelectedClip;
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
         {
             Title = "Export cut video",
-            SuggestedFileName = Path.GetFileNameWithoutExtension(SelectedClip.FileName) + "_cut.mp4",
+            SuggestedFileName = Path.GetFileNameWithoutExtension(clip.FileName) + "_cut.mp4",
             DefaultExtension = "mp4"
         });
         var path = file?.TryGetLocalPath();
         if (string.IsNullOrWhiteSpace(path)) return;
-        Status = "Rendering cut video...";
-        try
-        {
-            await _ffmpeg.ExportCutVideoAsync(SelectedClip.FilePath, SelectedClip.Segments, path, ReencodeExports);
-            Status = "Exported cut video.";
-            NotifyExportCompleted(path);
-        }
-        catch (Exception ex)
-        {
-            if (!HandleMissingFfmpeg(ex))
-                Status = $"Could not export cut video: {ex.Message}";
-        }
+
+        EnqueueExport(ExportJobKind.CutVideo, clip, path);
     }
 
     [RelayCommand]
     private async Task ExportPausesOnlyAsync()
     {
         if (SelectedClip is null || StorageProvider is null) return;
+        var clip = SelectedClip;
         var folder = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Choose folder for pause clips", AllowMultiple = false });
         var path = folder.FirstOrDefault()?.TryGetLocalPath();
         if (string.IsNullOrWhiteSpace(path)) return;
-        Status = "Exporting pause clips...";
-        try
-        {
-            await _ffmpeg.ExportPausesOnlyAsync(SelectedClip.FilePath, SelectedClip.Segments, path);
-            Status = "Exported pause clips.";
-            NotifyExportCompleted(path);
-        }
-        catch (Exception ex)
-        {
-            if (!HandleMissingFfmpeg(ex))
-                Status = $"Could not export pause clips: {ex.Message}";
-        }
+
+        EnqueueExport(ExportJobKind.PausesOnly, clip, path);
+    }
+
+    [RelayCommand]
+    private void ClearCompletedExports()
+    {
+        var removable = ExportQueue
+            .Where(x => x.Status is "Done" or "Failed")
+            .ToList();
+
+        foreach (var item in removable)
+            ExportQueue.Remove(item);
+
+        NotifyExportQueueCountChanged();
     }
 
     [RelayCommand]
@@ -581,6 +597,98 @@ public partial class MainWindowViewModel : ObservableObject
         var folder = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(folder))
             ExportCompleted?.Invoke(folder);
+    }
+
+    private void EnqueueExport(ExportJobKind kind, MediaClip clip, string outputPath)
+    {
+        var queueItem = new ExportQueueItem
+        {
+            ClipName = clip.FileName,
+            OutputName = Directory.Exists(outputPath) ? outputPath : Path.GetFileName(outputPath),
+            Kind = kind == ExportJobKind.CutVideo ? "Cut video" : "Pauses only",
+            Progress = 0
+        };
+
+        var job = new ExportJob(
+            kind,
+            clip.FilePath,
+            outputPath,
+            ReencodeExports,
+            CloneSegments(clip.Segments),
+            queueItem);
+
+        ExportQueue.Add(queueItem);
+        NotifyExportQueueCountChanged();
+
+        Status = $"Queued {queueItem.Kind.ToLowerInvariant()} for {clip.FileName}.";
+        _ = Task.Run(() => RunExportJobAsync(job));
+    }
+
+    private async Task RunExportJobAsync(ExportJob job)
+    {
+        await _exportSemaphore.WaitAsync();
+        try
+        {
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                job.QueueItem.Status = "Exporting";
+                job.QueueItem.Progress = 0;
+                Status = job.Kind == ExportJobKind.CutVideo
+                    ? $"Rendering cut video for {job.QueueItem.ClipName}..."
+                    : $"Exporting pause clips for {job.QueueItem.ClipName}...";
+            });
+
+            void ReportProgress(double value)
+            {
+                Dispatcher.UIThread.Post(() =>
+                    job.QueueItem.Progress = Math.Clamp(value, 0, 100));
+            }
+
+            if (job.Kind == ExportJobKind.CutVideo)
+                await _ffmpeg.ExportCutVideoAsync(job.InputFile, job.Segments, job.OutputPath, job.Reencode, progress: ReportProgress);
+            else
+                await _ffmpeg.ExportPausesOnlyAsync(job.InputFile, job.Segments, job.OutputPath, progress: ReportProgress);
+
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                job.QueueItem.Status = "Done";
+                job.QueueItem.Progress = 100;
+                Status = job.Kind == ExportJobKind.CutVideo
+                    ? $"Exported cut video for {job.QueueItem.ClipName}."
+                    : $"Exported pause clips for {job.QueueItem.ClipName}.";
+                NotifyExportCompleted(job.OutputPath);
+            });
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                job.QueueItem.Status = "Failed";
+                if (!HandleMissingFfmpeg(ex))
+                    Status = job.Kind == ExportJobKind.CutVideo
+                        ? $"Could not export cut video for {job.QueueItem.ClipName}: {ex.Message}"
+                        : $"Could not export pause clips for {job.QueueItem.ClipName}: {ex.Message}";
+            });
+        }
+        finally
+        {
+            _exportSemaphore.Release();
+        }
+    }
+
+    private static IReadOnlyList<TimelineSegment> CloneSegments(IEnumerable<TimelineSegment> segments) =>
+        segments.Select(s => new TimelineSegment
+        {
+            Kind = s.Kind,
+            Start = s.Start,
+            End = s.End,
+            Remove = s.Remove
+        }).ToList();
+
+    private void NotifyExportQueueCountChanged()
+    {
+        OnPropertyChanged(nameof(ExportQueueCountText));
+        OnPropertyChanged(nameof(HasQueuedExports));
     }
 
     private bool HandleMissingFfmpeg(Exception ex)

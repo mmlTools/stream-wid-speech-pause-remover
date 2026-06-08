@@ -13,10 +13,13 @@ namespace StreamWID.Views;
 public partial class MainWindow : Window
 {
     private bool _isFfmpegDialogOpen;
+    private bool _closeConfirmed;
+    private bool _isCloseConfirmationOpen;
 
     public MainWindow()
     {
         InitializeComponent();
+        Closing += MainWindow_Closing;
         Opened += async (_, _) =>
         {
             if (DataContext is MainWindowViewModel vm)
@@ -46,6 +49,35 @@ public partial class MainWindow : Window
 
     private void CloseButton_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e) => Close();
 
+    private async void MainWindow_Closing(object? sender, WindowClosingEventArgs e)
+    {
+        if (_closeConfirmed ||
+            DataContext is not MainWindowViewModel vm ||
+            !vm.HasActiveExports)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        if (_isCloseConfirmationOpen)
+            return;
+
+        _isCloseConfirmationOpen = true;
+        try
+        {
+            var shouldClose = await ShowActiveExportCloseDialogAsync(vm.ActiveExportCount);
+            if (!shouldClose)
+                return;
+
+            _closeConfirmed = true;
+            Close();
+        }
+        finally
+        {
+            _isCloseConfirmationOpen = false;
+        }
+    }
+
     private void MinimizeButton_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e) =>
         WindowState = WindowState.Minimized;
 
@@ -57,6 +89,13 @@ public partial class MainWindow : Window
         var launcher = TopLevel.GetTopLevel(this)?.Launcher;
         if (launcher is not null)
             await launcher.LaunchUriAsync(new Uri("https://www.paypal.com/donate/?hosted_button_id=ZKTLLYY9ADWYQ"));
+    }
+
+    private async void VisitWebsiteButton_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var launcher = TopLevel.GetTopLevel(this)?.Launcher;
+        if (launcher is not null)
+            await launcher.LaunchUriAsync(new Uri("https://streamwid.com"));
     }
 
     private async void LeaveReviewButton_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -290,6 +329,93 @@ public partial class MainWindow : Window
         {
             _isFfmpegDialogOpen = false;
         }
+    }
+
+    private async Task<bool> ShowActiveExportCloseDialogAsync(int activeCount)
+    {
+        var dialog = new Window
+        {
+            Title = "Exports In Progress",
+            Width = 440,
+            Height = 220,
+            CanResize = false,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = new SolidColorBrush(Colors.Transparent),
+            SystemDecorations = SystemDecorations.None,
+            Content = BuildActiveExportCloseDialogContent(activeCount)
+        };
+
+        return await dialog.ShowDialog<bool>(this);
+    }
+
+    private Control BuildActiveExportCloseDialogContent(int activeCount)
+    {
+        var title = new TextBlock
+        {
+            Text = "Exports are still running",
+            FontSize = 19,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = new SolidColorBrush(Color.Parse("#E5ECF7"))
+        };
+
+        var message = new TextBlock
+        {
+            Text = activeCount == 1
+                ? "There is 1 queued or active export. Closing now can stop the export before it finishes."
+                : $"There are {activeCount} queued or active exports. Closing now can stop them before they finish.",
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = new SolidColorBrush(Color.Parse("#B8C2D6"))
+        };
+
+        var cancelButton = BuildDialogButton("Keep Open", "#202838", "#E5ECF7", "#344052");
+        cancelButton.Click += (_, _) => ((Window)cancelButton.GetVisualRoot()!).Close(false);
+
+        var closeButton = BuildDialogButton("Close Anyway", "#C2413D", "#FFFFFF", "#C2413D");
+        closeButton.Click += (_, _) => ((Window)closeButton.GetVisualRoot()!).Close(true);
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Spacing = 10,
+            Children = { cancelButton, closeButton }
+        };
+
+        var body = new StackPanel
+        {
+            Spacing = 18,
+            Margin = new Thickness(20),
+            Children = { title, message, buttons }
+        };
+
+        return new Border
+        {
+            Background = new SolidColorBrush(Color.Parse("#151922")),
+            BorderBrush = new SolidColorBrush(Color.Parse("#2C3647")),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(0),
+            Child = body
+        };
+    }
+
+    private static Button BuildDialogButton(string text, string background, string foreground, string border)
+    {
+        return new Button
+        {
+            Content = text,
+            MinWidth = 118,
+            MinHeight = 36,
+            Padding = new Thickness(14, 7),
+            Background = new SolidColorBrush(Color.Parse(background)),
+            Foreground = new SolidColorBrush(Color.Parse(foreground)),
+            BorderBrush = new SolidColorBrush(Color.Parse(border)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
     }
 
     private Control BuildFfmpegMissingDialogContent()

@@ -102,6 +102,24 @@
 				</Border>
 			</Button>
 		</DataTemplate>
+		<DataTemplate DataType="m:ExportQueueItem" x:Key="ExportQueueItemTemplate">
+			<Border Background="#151922" BorderBrush="#2A3447" BorderThickness="1" CornerRadius="6" Padding="10,8,10,8" Margin="0,0,0,6">
+				<Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,16" ColumnSpacing="10" RowSpacing="5">
+					<TextBlock Text="{Binding ClipName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+					<TextBlock Grid.Column="1" Text="{Binding Status}" FontSize="12" Opacity=".78" />
+					<TextBlock Grid.Row="1" Text="{Binding Kind}" FontSize="12" Opacity=".7" />
+					<TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding OutputName}" FontSize="12" Opacity=".62" TextTrimming="CharacterEllipsis" MaxWidth="150" />
+					<Grid Grid.Row="2" Grid.ColumnSpan="2" Margin="6,3,6,0">
+						<ProgressBar Minimum="0" Maximum="100" Value="{Binding Progress}" Height="8" VerticalAlignment="Bottom" />
+						<TextBlock Text="{Binding ProgressText}"
+								   FontSize="10"
+								   Opacity=".82"
+								   HorizontalAlignment="Center"
+								   VerticalAlignment="Center" />
+					</Grid>
+				</Grid>
+			</Border>
+		</DataTemplate>
 	</Window.Resources>
 
 	<Window.Styles>
@@ -220,6 +238,28 @@
 			<Setter Property="Background" Value="#3A4354" />
 			<Setter Property="Foreground" Value="#FFFFFF" />
 		</Style>
+		<Style Selector="Button.dropdown-menu-button">
+			<Setter Property="MinHeight" Value="34" />
+			<Setter Property="Padding" Value="12,7" />
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="Foreground" Value="#E5ECF7" />
+			<Setter Property="BorderThickness" Value="0" />
+			<Setter Property="CornerRadius" Value="6" />
+			<Setter Property="HorizontalContentAlignment" Value="Left" />
+			<Setter Property="VerticalContentAlignment" Value="Center" />
+		</Style>
+		<Style Selector="Button.dropdown-menu-button:pointerover">
+			<Setter Property="Background" Value="#202838" />
+		</Style>
+		<Style Selector="Button.dropdown-menu-button:pressed">
+			<Setter Property="Background" Value="#18202E" />
+		</Style>
+		<Style Selector="FlyoutPresenter">
+			<Setter Property="Padding" Value="0" />
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="BorderThickness" Value="0" />
+			<Setter Property="CornerRadius" Value="0" />
+		</Style>
 		<Style Selector="NumericUpDown">
 			<Setter Property="MinHeight" Value="34" />
 			<Setter Property="Background" Value="#101722" />
@@ -236,6 +276,7 @@
 		</Style>
 		<Style Selector="ComboBox">
 			<Setter Property="MinHeight" Value="34" />
+			<Setter Property="Padding" Value="12,0,8,0" />
 			<Setter Property="Background" Value="#101722" />
 			<Setter Property="Foreground" Value="#E5ECF7" />
 			<Setter Property="BorderBrush" Value="#2E3849" />
@@ -251,7 +292,16 @@
 		<Style Selector="ComboBoxItem">
 			<Setter Property="Background" Value="#101722" />
 			<Setter Property="Foreground" Value="#E5ECF7" />
-			<Setter Property="Padding" Value="8,6" />
+			<Setter Property="Margin" Value="0" />
+			<Setter Property="Padding" Value="12,8" />
+			<Setter Property="HorizontalContentAlignment" Value="Stretch" />
+		</Style>
+		<Style Selector="ComboBoxItem:pointerover">
+			<Setter Property="Background" Value="#202838" />
+		</Style>
+		<Style Selector="ComboBoxItem:selected">
+			<Setter Property="Background" Value="#17689F" />
+			<Setter Property="Foreground" Value="#FFFFFF" />
 		</Style>
 		<Style Selector="ListBox">
 			<Setter Property="Background" Value="#10141C" />
@@ -291,6 +341,56 @@
 							ToolTip.Tip="Open latest GitHub release"
 							IsVisible="{Binding IsUpdateAvailable}">
 						<TextBlock Text="↥" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center" />
+					</Button>
+
+					<Button Classes="window-control"
+							ToolTip.Tip="Export queue">
+						<Grid Width="24" Height="24">
+							<TextBlock Text="≈" Foreground="#5ae795" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center" />
+							<Border Width="16"
+									Height="16"
+									CornerRadius="8"
+									Background="#d7fff0"
+									HorizontalAlignment="Right"
+									VerticalAlignment="Top"
+									IsVisible="{Binding HasQueuedExports}">
+								<TextBlock Text="{Binding ExportQueueCountText}"
+										   FontSize="10"
+										   Foreground="#0E1724"
+										   HorizontalAlignment="Center"
+										   VerticalAlignment="Center" />
+							</Border>
+						</Grid>
+						<Button.Flyout>
+							<Flyout Placement="BottomEdgeAlignedRight">
+								<Border Width="360"
+										Background="#10141C"
+										BorderBrush="#344052"
+										BorderThickness="1"
+										CornerRadius="8"
+										Padding="12">
+									<StackPanel Spacing="10">
+										<Grid ColumnDefinitions="*,Auto">
+											<TextBlock Text="Export Queue" FontWeight="SemiBold" Foreground="#E5ECF7" />
+											<Button Grid.Column="1"
+													Classes="text-button"
+													MinWidth="70"
+													Content="Clear Done"
+													Command="{Binding ClearCompletedExportsCommand}" />
+										</Grid>
+										<ScrollViewer MaxHeight="280">
+											<ItemsControl ItemsSource="{Binding ExportQueue}" ItemTemplate="{StaticResource ExportQueueItemTemplate}" />
+										</ScrollViewer>
+									</StackPanel>
+								</Border>
+							</Flyout>
+						</Button.Flyout>
+					</Button>
+
+					<Button Classes="window-control" Click="VisitWebsiteButton_Click"
+							ToolTip.Tip="Visit website">
+						<TextBlock Text="↗" FontSize="13" Foreground="#9CB7FF"
+								   HorizontalAlignment="Center" VerticalAlignment="Center" />
 					</Button>
 
 					<Button Classes="window-control" Click="SupportProjectButton_Click"
@@ -382,7 +482,7 @@
 							<ComboBox ItemsSource="{Binding DetectionPresets}" SelectedItem="{Binding SelectedDetectionPreset}" MinHeight="34" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
 								<ComboBox.ItemTemplate>
 									<DataTemplate>
-										<Border Width="{Binding Path=Bounds.Width, RelativeSource={RelativeSource AncestorType=ComboBox}}" Padding="6,4">
+										<Border Background="#101722" Padding="0">
 											<TextBlock Text="{Binding Name}" VerticalAlignment="Center" />
 										</Border>
 									</DataTemplate>
@@ -457,12 +557,21 @@
 												   IsVisible="{Binding ExportCutVideoCommand.IsRunning}" />
 									</Grid>
 									<Button.Flyout>
-										<MenuFlyout Placement="TopEdgeAlignedRight">
-											<MenuItem Header="Export Cut Video" Click="ExportCutVideoButton_Click" />
-											<MenuItem Header="Export Pauses Only" Click="ExportPausesOnlyButton_Click" />
-											<MenuItem Header="Export EDL Cut List" Click="ExportEdlButton_Click" />
-											<MenuItem Header="Export CSV Cut List" Click="ExportCsvButton_Click" />
-										</MenuFlyout>
+										<Flyout Placement="TopEdgeAlignedRight">
+											<Border Width="220"
+													Background="#10141C"
+													BorderBrush="#344052"
+													BorderThickness="1"
+													CornerRadius="8"
+													Padding="8">
+												<StackPanel Spacing="2">
+													<Button Classes="dropdown-menu-button" Content="Export Cut Video" Click="ExportCutVideoButton_Click" />
+													<Button Classes="dropdown-menu-button" Content="Export Pauses Only" Click="ExportPausesOnlyButton_Click" />
+													<Button Classes="dropdown-menu-button" Content="Export EDL Cut List" Click="ExportEdlButton_Click" />
+													<Button Classes="dropdown-menu-button" Content="Export CSV Cut List" Click="ExportCsvButton_Click" />
+												</StackPanel>
+											</Border>
+										</Flyout>
 									</Button.Flyout>
 								</Button>
 							</StackPanel>
