@@ -41,6 +41,7 @@ public partial class MainWindowViewModel : ObservableObject
     private string? _previewFolder;
     private int _previewFrameIndex;
     private double _timelineTrackWidth = 760;
+    private bool _isLoadingSettings = true;
     private static readonly HashSet<string> SupportedVideoExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".mp4",
@@ -80,11 +81,13 @@ public partial class MainWindowViewModel : ObservableObject
     [ObservableProperty] private bool isUpdateAvailable;
     [ObservableProperty] private string latestVersion = "";
     [ObservableProperty] private string latestReleaseUrl = "";
+    [ObservableProperty] private bool isCliAvailable;
 
     public string ExportQueueCountText => ExportQueue.Count.ToString();
     public bool HasQueuedExports => ExportQueue.Count > 0;
     public int ActiveExportCount => ExportQueue.Count(x => x.Status is "Queued" or "Exporting");
     public bool HasActiveExports => ActiveExportCount > 0;
+    public bool IsContextMenuSupported => CliIntegrationService.IsContextMenuSupported;
 
     public MainWindowViewModel()
     {
@@ -93,9 +96,20 @@ public partial class MainWindowViewModel : ObservableObject
         DetectionPresets.Add(new DetectionPreset("Lecture / Presentation", -38, 0.55, 0.12));
         DetectionPresets.Add(new DetectionPreset("Stream / Gameplay", -28, 0.80, 0.10));
 
-        SelectedDetectionPreset = DetectionPresets.FirstOrDefault();
+        ThresholdDb = _settings.ThresholdDb;
+        MinSilenceSeconds = _settings.MinSilenceSeconds;
+        KeepPaddingSeconds = _settings.KeepPaddingSeconds;
+        ResolveFps = _settings.ResolveFps;
+        UseAdaptiveThreshold = _settings.UseAdaptiveThreshold;
+        ReencodeExports = _settings.ReencodeExports;
+        SelectedDetectionPreset = DetectionPresets.FirstOrDefault(p =>
+            Math.Abs(p.ThresholdDb - ThresholdDb) < 0.001 &&
+            Math.Abs(p.MinSilenceSeconds - MinSilenceSeconds) < 0.001 &&
+            Math.Abs(p.KeepPaddingSeconds - KeepPaddingSeconds) < 0.001);
         AdaptiveThresholdDb = ThresholdDb;
+        IsCliAvailable = CliIntegrationService.IsCliAvailable();
         _previewTimer.Tick += (_, _) => AdvancePreviewFrame();
+        _isLoadingSettings = false;
     }
 
     public IStorageProvider? StorageProvider { get; set; }
@@ -231,8 +245,18 @@ public partial class MainWindowViewModel : ObservableObject
         KeepPaddingSeconds = value.KeepPaddingSeconds;
     }
 
+    partial void OnThresholdDbChanged(double value) => SaveDetectionSettings();
+    partial void OnMinSilenceSecondsChanged(double value) => SaveDetectionSettings();
+    partial void OnKeepPaddingSecondsChanged(double value) => SaveDetectionSettings();
+    partial void OnResolveFpsChanged(double value) => SaveDetectionSettings();
+    partial void OnReencodeExportsChanged(bool value) => SaveDetectionSettings();
+
     partial void OnUseAdaptiveThresholdChanged(bool value)
     {
+        SaveDetectionSettings();
+        if (_isLoadingSettings)
+            return;
+
         _ = ShowToastAsync(value
             ? $"Adaptive threshold enabled. Suggestions will be applied from audio analysis."
             : "Adaptive threshold disabled. Manual threshold will be used.");
@@ -267,6 +291,36 @@ public partial class MainWindowViewModel : ObservableObject
         catch (Exception ex)
         {
             Debug.WriteLine($"Update check failed: {ex.Message}");
+        }
+    }
+
+    [RelayCommand]
+    private void InstallCli()
+    {
+        try
+        {
+            CliIntegrationService.InstallCli();
+            IsCliAvailable = CliIntegrationService.IsCliAvailable();
+            Status = "StreamWID CLI added. Open a new terminal and run swid --help.";
+        }
+        catch (Exception ex)
+        {
+            Status = $"Could not add CLI to PATH: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void InstallContextMenu()
+    {
+        try
+        {
+            CliIntegrationService.InstallWindowsContextMenu();
+            IsCliAvailable = CliIntegrationService.IsCliAvailable();
+            Status = "Added StreamWID to the media file right-click menu.";
+        }
+        catch (Exception ex)
+        {
+            Status = $"Could not add context menu: {ex.Message}";
         }
     }
 
@@ -584,6 +638,20 @@ public partial class MainWindowViewModel : ObservableObject
 
         await Task.Delay(4200);
         await Dispatcher.UIThread.InvokeAsync(() => Toasts.Remove(message));
+    }
+
+    private void SaveDetectionSettings()
+    {
+        if (_isLoadingSettings)
+            return;
+
+        _settings.ThresholdDb = ThresholdDb;
+        _settings.MinSilenceSeconds = MinSilenceSeconds;
+        _settings.KeepPaddingSeconds = KeepPaddingSeconds;
+        _settings.ResolveFps = ResolveFps;
+        _settings.UseAdaptiveThreshold = UseAdaptiveThreshold;
+        _settings.ReencodeExports = ReencodeExports;
+        _settings.Save();
     }
 
     public void DismissToast(string message)

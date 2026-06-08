@@ -17,6 +17,9 @@ It uses FFmpeg for analysis, preview generation, and export. The app is built wi
 - Select or deselect all pause sections.
 - Remove uploaded clips from the list with the clip context menu.
 - Queue long cut-video and pause-only exports while continuing to review other clips.
+- Save the last detection/export settings in user data so the GUI, CLI, and context menu use the same defaults.
+- Add a `swid` command to the user `PATH` from the top bar or with `swid --install-cli`.
+- Add a media file right-click context menu entry on Windows with the top-bar menu button or `swid --install-context-menu`.
 - Export from a compact export menu:
   - cut video
   - pause-only clips
@@ -42,6 +45,41 @@ ffplay -version
 dotnet restore
 dotnet run
 ```
+
+## CLI
+
+After adding the CLI to `PATH`, open a new terminal and run:
+
+```bash
+swid [options] "path/to/clip.mp4"
+```
+
+By default, the CLI analyzes the clip with your saved settings and exports `clip_cut.mp4` next to the source file.
+
+Fine-tuning options:
+
+```bash
+swid --threshold -35 --min-pause 0.45 --padding 0.08 "path/to/clip.mp4"
+swid --no-adaptive --stream-copy --output "path/to/output.mp4" "path/to/clip.mp4"
+swid --pauses-only "path/to/clip.mp4"
+swid --edl "path/to/clip.mp4"
+swid --csv "path/to/clip.mp4"
+```
+
+Setup commands:
+
+```bash
+swid --install-cli
+swid --install-context-menu
+```
+
+On Windows, the context menu command is added for common media extensions and runs:
+
+```bash
+swid --auto "path/to/clip.mp4"
+```
+
+The CLI and GUI both read and write the same settings file in the user's StreamWID app data folder.
 
 ## Workflow
 

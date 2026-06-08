@@ -79,8 +79,11 @@ jobs:
       - name: Build
         run: dotnet build StreamWID.sln --configuration Release --no-restore /p:Version=${{ steps.presets.outputs.version }}
 
-      - name: Publish
+      - name: Publish app
         run: dotnet publish StreamWID.csproj --configuration Release --runtime ${{ matrix.runtime }} --self-contained true --output artifacts/${{ matrix.runtime }} /p:Version=${{ steps.presets.outputs.version }}
+
+      - name: Publish CLI
+        run: dotnet publish Cli/StreamWID.Cli.csproj --configuration Release --runtime ${{ matrix.runtime }} --self-contained true --output artifacts/${{ matrix.runtime }} /p:Version=${{ steps.presets.outputs.version }}
 
       - name: Package Windows
         if: matrix.archive == 'zip'

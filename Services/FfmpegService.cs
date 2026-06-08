@@ -53,18 +53,27 @@ public sealed class FfmpegService
         double minSilenceSeconds,
         double keepPaddingSeconds,
         bool useAdaptiveThreshold,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        Action<string, double>? progress = null)
     {
+        var duration = await GetDurationAsync(file, ct);
         var adaptiveThreshold = thresholdDb;
         if (useAdaptiveThreshold)
         {
-            adaptiveThreshold = await GetAdaptiveThresholdDbAsync(file, ct);
+            adaptiveThreshold = await GetAdaptiveThresholdDbAsync(file, ct, value =>
+                progress?.Invoke("Analyzing audio profile", value * 0.5));
             adaptiveThreshold = Math.Max(thresholdDb, adaptiveThreshold);
         }
 
-        var duration = await GetDurationAsync(file, ct);
-        var args = $"-hide_banner -i {Q(file)} -af silencedetect=noise={adaptiveThreshold.ToString(CultureInfo.InvariantCulture)}dB:d={minSilenceSeconds.ToString(CultureInfo.InvariantCulture)} -f null -";
-        var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct);
+        var baseProgress = useAdaptiveThreshold ? 50 : 0;
+        var scaleProgress = useAdaptiveThreshold ? 0.5 : 1;
+        var args = $"-hide_banner -i {Q(file)} -af silencedetect=noise={adaptiveThreshold.ToString(CultureInfo.InvariantCulture)}dB:d={minSilenceSeconds.ToString(CultureInfo.InvariantCulture)} -progress pipe:1 -f null -";
+        var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct, onStdOutLine: line =>
+        {
+            var seconds = TryParseProgressSeconds(line);
+            if (seconds.HasValue)
+                progress?.Invoke("Finding pauses", baseProgress + Math.Clamp(seconds.Value / Math.Max(duration, 0.1) * 100, 0, 99) * scaleProgress);
+        });
 
         var silenceRanges = new List<(double Start, double End)>();
         double? pendingStart = null;
@@ -87,12 +96,22 @@ public sealed class FfmpegService
             silenceRanges.Add((Math.Max(0, pendingStart.Value + keepPaddingSeconds), duration));
 
         silenceRanges = silenceRanges.Where(x => x.End > x.Start).OrderBy(x => x.Start).ToList();
+        progress?.Invoke("Finding pauses", 100);
         return (BuildFullTimeline(duration, silenceRanges), adaptiveThreshold);
     }
 
-    public async Task<double> GetAdaptiveThresholdDbAsync(string file, CancellationToken ct = default)
+    public async Task<double> GetAdaptiveThresholdDbAsync(string file, CancellationToken ct = default, Action<double>? progress = null)
     {
-        var result = await ProcessRunner.RunAsync(FfmpegPath, $"-hide_banner -i {Q(file)} -af volumedetect -f null -", ct);
+        var duration = progress is null ? 0 : await GetDurationAsync(file, ct);
+        var result = await ProcessRunner.RunAsync(FfmpegPath, $"-hide_banner -i {Q(file)} -af volumedetect -progress pipe:1 -f null -", ct, onStdOutLine: line =>
+        {
+            if (duration <= 0)
+                return;
+
+            var seconds = TryParseProgressSeconds(line);
+            if (seconds.HasValue)
+                progress?.Invoke(Math.Clamp(seconds.Value / Math.Max(duration, 0.1) * 100, 0, 99));
+        });
         var mean = MeanVolumeRegex.Match(result.StdErr);
         var max = MaxVolumeRegex.Match(result.StdErr);
 
@@ -101,6 +120,7 @@ public sealed class FfmpegService
 
         var suggested = Math.Clamp(meanValue - 14, -55, -18);
         suggested = Math.Min(suggested, maxValue - 6);
+        progress?.Invoke(100);
         return Math.Clamp(suggested, -55, -18);
     }
 

@@ -12,6 +12,15 @@ public sealed class AppSettings
 
     public string? LastKnownVersion { get; set; }
     public string? LastSeenUpdateVersion { get; set; }
+    public double ThresholdDb { get; set; } = -35;
+    public double MinSilenceSeconds { get; set; } = 0.45;
+    public double KeepPaddingSeconds { get; set; } = 0.08;
+    public double ResolveFps { get; set; } = 25;
+    public bool UseAdaptiveThreshold { get; set; } = true;
+    public bool ReencodeExports { get; set; } = true;
+
+    public static string Folder => SettingsFolder;
+    public static string FilePath => SettingsPath;
 
     public static AppSettings Load()
     {

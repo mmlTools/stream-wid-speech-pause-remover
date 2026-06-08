@@ -344,6 +344,22 @@
 					</Button>
 
 					<Button Classes="window-control"
+							Command="{Binding InstallCliCommand}"
+							ToolTip.Tip="Add swid command to PATH"
+							IsVisible="{Binding IsCliAvailable, Converter={x:Static BoolConverters.Not}}">
+						<TextBlock Text="CLI" FontSize="10" FontWeight="SemiBold"
+								   HorizontalAlignment="Center" VerticalAlignment="Center" />
+					</Button>
+
+					<Button Classes="window-control"
+							Command="{Binding InstallContextMenuCommand}"
+							ToolTip.Tip="Add StreamWID to media file right-click menu"
+							IsVisible="{Binding IsContextMenuSupported}">
+						<TextBlock Text="☰" FontSize="13"
+								   HorizontalAlignment="Center" VerticalAlignment="Center" />
+					</Button>
+
+					<Button Classes="window-control"
 							ToolTip.Tip="Export queue">
 						<Grid Width="24" Height="24">
 							<TextBlock Text="≈" Foreground="#5ae795" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center" />

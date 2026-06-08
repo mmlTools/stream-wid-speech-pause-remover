@@ -9,6 +9,10 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tests", "Tests", "{0AB3BF05
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamWID.Tests", "Tests\StreamWID.Tests\StreamWID.Tests.csproj", "{BC2DDE2E-7448-465F-A9FA-98CC37EC39F0}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Cli", "Cli", "{342A349A-D343-8551-4064-2E2800C39E13}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamWID.Cli", "Cli\StreamWID.Cli.csproj", "{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -43,12 +47,25 @@ Global
 		{BC2DDE2E-7448-465F-A9FA-98CC37EC39F0}.Release|x64.Build.0 = Release|Any CPU
 		{BC2DDE2E-7448-465F-A9FA-98CC37EC39F0}.Release|x86.ActiveCfg = Release|Any CPU
 		{BC2DDE2E-7448-465F-A9FA-98CC37EC39F0}.Release|x86.Build.0 = Release|Any CPU
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}.Debug|x64.Build.0 = Debug|Any CPU
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}.Debug|x86.Build.0 = Debug|Any CPU
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}.Release|x64.ActiveCfg = Release|Any CPU
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}.Release|x64.Build.0 = Release|Any CPU
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}.Release|x86.ActiveCfg = Release|Any CPU
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{BC2DDE2E-7448-465F-A9FA-98CC37EC39F0} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{BC6D3DC0-C78C-4B56-8F9D-98FD2B3D3A41} = {342A349A-D343-8551-4064-2E2800C39E13}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {180604A5-DA3C-4F49-9A6D-F9608C837251}
