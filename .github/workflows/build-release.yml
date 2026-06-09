@@ -142,6 +142,8 @@ jobs:
 
           [Run]
           Filename: "{app}\StreamWID.exe"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+          Filename: "https://www.paypal.com/donate/?hosted_button_id=ZKTLLYY9ADWYQ"; Description: "Leave a tip"; Flags: shellexec postinstall skipifsilent unchecked
+          Filename: "https://streamwid.com"; Description: "Visit website"; Flags: shellexec postinstall skipifsilent unchecked
           "@ | Set-Content -Encoding UTF8 installer.iss
 
           & $iscc installer.iss
