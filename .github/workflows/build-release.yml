@@ -93,6 +93,60 @@ jobs:
           Compress-Archive -Path "artifacts/${{ matrix.runtime }}/*" -DestinationPath $asset -Force
           "ASSET_PATH=$asset" >> $env:GITHUB_ENV
 
+      - name: Build Windows installer
+        if: matrix.runtime == 'win-x64'
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+
+          $appName = "${{ steps.presets.outputs.appName }}"
+          $version = "${{ steps.presets.outputs.version }}"
+          $runtime = "${{ matrix.runtime }}"
+          $installer = "$appName-${{ steps.presets.outputs.releaseTag }}-$runtime-setup.exe"
+          $publishDir = (Resolve-Path "artifacts/$runtime").Path
+          $icon = (Resolve-Path "Assets/Icons/app-icon.ico").Path
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+
+          @"
+          #define AppName "$appName"
+          #define AppVersion "$version"
+          #define PublishDir "$publishDir"
+          #define OutputBaseName "$($installer -replace '\.exe$','')"
+
+          [Setup]
+          AppId={{A6340526-B738-4B87-91B6-6E55E2073B46}
+          AppName={#AppName}
+          AppVersion={#AppVersion}
+          AppPublisher=StreamWID
+          DefaultDirName={autopf}\{#AppName}
+          DefaultGroupName={#AppName}
+          UninstallDisplayIcon={app}\StreamWID.exe
+          SetupIconFile=$icon
+          Compression=lzma2
+          SolidCompression=yes
+          WizardStyle=modern
+          OutputDir=.
+          OutputBaseFilename={#OutputBaseName}
+          ArchitecturesAllowed=x64
+          ArchitecturesInstallIn64BitMode=x64
+
+          [Files]
+          Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{group}\{#AppName}"; Filename: "{app}\StreamWID.exe"
+          Name: "{autodesktop}\{#AppName}"; Filename: "{app}\StreamWID.exe"; Tasks: desktopicon
+
+          [Tasks]
+          Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"
+
+          [Run]
+          Filename: "{app}\StreamWID.exe"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+          "@ | Set-Content -Encoding UTF8 installer.iss
+
+          & $iscc installer.iss
+          "INSTALLER_PATH=$installer" >> $env:GITHUB_ENV
+
       - name: Package Linux/macOS
         if: matrix.archive == 'tar.gz'
         shell: bash
@@ -101,9 +155,113 @@ jobs:
           tar -czf "$asset" -C "artifacts/${{ matrix.runtime }}" .
           echo "ASSET_PATH=$asset" >> "$GITHUB_ENV"
 
+      - name: Build macOS DMG
+        if: startsWith(matrix.runtime, 'osx-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_name="${{ steps.presets.outputs.appName }}"
+          runtime="${{ matrix.runtime }}"
+          app_bundle="artifacts/$runtime-app/$app_name.app"
+          dmg="$app_name-${{ steps.presets.outputs.releaseTag }}-$runtime.dmg"
+
+          mkdir -p "$app_bundle/Contents/MacOS" "$app_bundle/Contents/Resources"
+          cp -R "artifacts/$runtime/." "$app_bundle/Contents/MacOS/"
+          chmod +x "$app_bundle/Contents/MacOS/StreamWID" || true
+          cp "Assets/Icons/app-icon.png" "$app_bundle/Contents/Resources/app-icon.png"
+
+          cat > "$app_bundle/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDisplayName</key>
+            <string>$app_name</string>
+            <key>CFBundleExecutable</key>
+            <string>StreamWID</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.streamwid.app</string>
+            <key>CFBundleName</key>
+            <string>$app_name</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${{ steps.presets.outputs.version }}</string>
+            <key>CFBundleVersion</key>
+            <string>${{ steps.presets.outputs.version }}</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          rm -f "$dmg"
+          hdiutil create -volname "$app_name" -srcfolder "artifacts/$runtime-app" -ov -format UDZO "$dmg"
+          echo "INSTALLER_PATH=$dmg" >> "$GITHUB_ENV"
+
+      - name: Build Linux DEB installer
+        if: matrix.runtime == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_name="${{ steps.presets.outputs.appName }}"
+          package_name="$(echo "$app_name" | tr '[:upper:]' '[:lower:]')"
+          version="${{ steps.presets.outputs.version }}"
+          runtime="${{ matrix.runtime }}"
+          root="artifacts/deb-root"
+          deb="$app_name-${{ steps.presets.outputs.releaseTag }}-$runtime.deb"
+
+          rm -rf "$root"
+          mkdir -p "$root/DEBIAN" "$root/usr/lib/$package_name" "$root/usr/bin" "$root/usr/share/applications" "$root/usr/share/icons/hicolor/256x256/apps"
+          cp -R "artifacts/$runtime/." "$root/usr/lib/$package_name/"
+          chmod +x "$root/usr/lib/$package_name/StreamWID" "$root/usr/lib/$package_name/swid" || true
+          cp "Assets/Icons/app-icon.png" "$root/usr/share/icons/hicolor/256x256/apps/$package_name.png"
+
+          cat > "$root/usr/bin/streamwid" <<SH
+          #!/usr/bin/env sh
+          exec /usr/lib/$package_name/StreamWID "\$@"
+          SH
+          chmod +x "$root/usr/bin/streamwid"
+
+          cat > "$root/usr/bin/swid" <<SH
+          #!/usr/bin/env sh
+          exec /usr/lib/$package_name/swid "\$@"
+          SH
+          chmod +x "$root/usr/bin/swid"
+
+          cat > "$root/usr/share/applications/$package_name.desktop" <<DESKTOP
+          [Desktop Entry]
+          Type=Application
+          Name=$app_name
+          Exec=streamwid %F
+          Icon=$package_name
+          Categories=AudioVideo;Video;
+          Terminal=false
+          DESKTOP
+
+          installed_size="$(du -sk "$root/usr" | cut -f1)"
+          cat > "$root/DEBIAN/control" <<CONTROL
+          Package: $package_name
+          Version: $version
+          Section: video
+          Priority: optional
+          Architecture: amd64
+          Depends: ffmpeg
+          Installed-Size: $installed_size
+          Maintainer: StreamWID
+          Description: Desktop video utility for finding and cutting pauses in speech recordings.
+          CONTROL
+
+          dpkg-deb --build "$root" "$deb"
+          echo "INSTALLER_PATH=$deb" >> "$GITHUB_ENV"
+
       - name: Upload package to release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh release upload "${{ steps.presets.outputs.releaseTag }}" "$ASSET_PATH" --clobber
+          assets=("$ASSET_PATH")
+          if [ -n "${INSTALLER_PATH:-}" ]; then
+            assets+=("$INSTALLER_PATH")
+          fi
+          gh release upload "${{ steps.presets.outputs.releaseTag }}" "${assets[@]}" --clobber

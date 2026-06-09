@@ -118,7 +118,11 @@ public partial class MainWindowViewModel : ObservableObject
     {
         try
         {
-            await _ffmpeg.CheckToolsAvailableAsync();
+            if (!await _ffmpeg.EnsureToolsAvailableAsync(status: message => Status = message))
+            {
+                Status = "FFmpeg was not found. Install FFmpeg and make sure it is available in PATH.";
+                FfmpegMissing?.Invoke();
+            }
         }
         catch (Exception ex) when (FfmpegService.IsMissingToolException(ex))
         {

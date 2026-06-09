@@ -56,7 +56,8 @@ public static class CliRunner
             settings.Save();
 
             var ffmpeg = new FfmpegService();
-            await ffmpeg.CheckToolsAvailableAsync(ct);
+            if (!await ffmpeg.EnsureToolsAvailableAsync(ct, message => output.WriteLine(message)))
+                throw new InvalidOperationException("FFmpeg was not found and could not be installed automatically. Install FFmpeg and make sure it is available in PATH.");
 
             await output.WriteLineAsync($"Analyzing {Path.GetFileName(options.InputFile)}...");
             await output.FlushAsync();

@@ -2,6 +2,7 @@ using StreamWID.Models;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -27,10 +28,97 @@ public sealed class FfmpegService
         await ProcessRunner.RunAsync(FfplayPath, "-version", ct);
     }
 
+    public async Task<bool> EnsureToolsAvailableAsync(CancellationToken ct = default, Action<string>? status = null)
+    {
+        try
+        {
+            await CheckToolsAvailableAsync(ct);
+            return true;
+        }
+        catch (Exception ex) when (IsMissingToolException(ex))
+        {
+            status?.Invoke("FFmpeg was not found. Trying to install it automatically...");
+        }
+
+        if (!await TryInstallFfmpegAsync(ct, status))
+            return false;
+
+        await CheckToolsAvailableAsync(ct);
+        status?.Invoke("FFmpeg is ready.");
+        return true;
+    }
+
     public static bool IsMissingToolException(Exception ex) =>
         ex is Win32Exception { NativeErrorCode: 2 or 3 } ||
         ex is FileNotFoundException ||
         ex.InnerException is not null && IsMissingToolException(ex.InnerException);
+
+    private static async Task<bool> TryInstallFfmpegAsync(CancellationToken ct, Action<string>? status)
+    {
+        foreach (var command in GetInstallCommands())
+        {
+            if (!IsCommandAvailable(command.Exe))
+                continue;
+
+            status?.Invoke($"Installing FFmpeg with {command.Name}...");
+            try
+            {
+                var result = await ProcessRunner.RunAsync(command.Exe, command.Args, ct);
+                if (result.ExitCode == 0)
+                    return true;
+
+                Debug.WriteLine($"{command.Name} FFmpeg install failed: {result.StdErr}");
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                Debug.WriteLine($"{command.Name} FFmpeg install failed: {ex.Message}");
+            }
+        }
+
+        status?.Invoke("Automatic FFmpeg install was not available on this system.");
+        return false;
+    }
+
+    private static IEnumerable<(string Name, string Exe, string Args)> GetInstallCommands()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            yield return ("winget", "winget", "install --id Gyan.FFmpeg --exact --silent --accept-package-agreements --accept-source-agreements");
+            yield return ("Chocolatey", "choco", "install ffmpeg -y");
+            yield break;
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            yield return ("Homebrew", "brew", "install ffmpeg");
+            yield break;
+        }
+
+        yield return ("APT", "apt-get", "install -y ffmpeg");
+        yield return ("DNF", "dnf", "install -y ffmpeg");
+        yield return ("Pacman", "pacman", "-S --noconfirm ffmpeg");
+        yield return ("Zypper", "zypper", "--non-interactive install ffmpeg");
+    }
+
+    private static bool IsCommandAvailable(string command)
+    {
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        var extensions = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? (Environment.GetEnvironmentVariable("PATHEXT") ?? ".EXE;.CMD;.BAT;.COM").Split(';', StringSplitOptions.RemoveEmptyEntries)
+            : [""];
+
+        foreach (var folder in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            foreach (var extension in extensions)
+            {
+                var candidate = Path.Combine(folder.Trim('"'), command + extension);
+                if (File.Exists(candidate))
+                    return true;
+            }
+        }
+
+        return false;
+    }
 
     public async Task<double> GetDurationAsync(string file, CancellationToken ct = default)
     {
