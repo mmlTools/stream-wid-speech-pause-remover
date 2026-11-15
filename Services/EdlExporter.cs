@@ -1,4 +1,5 @@
 using StreamWID.Models;
+using System.Globalization;
 using System.Text;
 
 namespace StreamWID.Services;
@@ -29,8 +30,13 @@ public static class EdlExporter
 
     public static async Task ExportCutListCsvAsync(string path, MediaClip clip)
     {
+        // Numbers are written with a dot regardless of the system language. A comma decimal separator
+        // would otherwise add extra columns to every row.
+        var fileName = clip.FileName.Replace("\"", "\"\"");
         var lines = new List<string> { "file,kind,start,end,duration,remove" };
-        lines.AddRange(clip.Segments.Select(s => $"\"{clip.FileName}\",{s.Kind},{s.Start:0.###},{s.End:0.###},{s.Duration:0.###},{s.Remove}"));
+        lines.AddRange(clip.Segments.Select(s => string.Create(
+            CultureInfo.InvariantCulture,
+            $"\"{fileName}\",{s.Kind},{s.Start:0.###},{s.End:0.###},{s.Duration:0.###},{s.Remove}")));
         await File.WriteAllLinesAsync(path, lines);
     }
 

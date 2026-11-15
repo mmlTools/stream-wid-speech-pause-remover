@@ -3,19 +3,50 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace StreamWID.Services;
 
+/// <summary>What FFprobe reports about a clip. Times are in seconds.</summary>
+public sealed record MediaInfo(
+    double DurationSeconds,
+    double StartTime,
+    bool HasVideo,
+    bool HasAudio,
+    double FrameRate,
+    bool IsConstantFrameRate,
+    double FirstVideoFrameTime)
+{
+    public static MediaInfo Unknown { get; } = new(0, 0, false, false, 0, false, 0);
+}
+
+/// <summary>
+/// Outcome of a cut-video export. <see cref="ExportedSeconds"/> is longer than
+/// <see cref="RequestedSeconds"/> when a stream copy export had to leave pauses in because they did
+/// not start on a keyframe.
+/// </summary>
+public sealed record CutExportResult(double RequestedSeconds, double ExportedSeconds)
+{
+    public double ExtraSeconds => Math.Max(0, ExportedSeconds - RequestedSeconds);
+}
+
 public sealed class FfmpegService
 {
-    private static readonly Regex DurationRegex = new(@"Duration:\s(?<h>\d+):(?<m>\d+):(?<s>\d+(\.\d+)?)", RegexOptions.Compiled);
-    private static readonly Regex SilenceStartRegex = new(@"silence_start:\s(?<v>[0-9\.]+)", RegexOptions.Compiled);
-    private static readonly Regex SilenceEndRegex = new(@"silence_end:\s(?<v>[0-9\.]+)", RegexOptions.Compiled);
+    private const string NumberPattern = @"-?[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?";
+    private static readonly Regex SilenceStartRegex = new($@"silence_start:\s*(?<v>{NumberPattern})", RegexOptions.Compiled);
+    private static readonly Regex SilenceEndRegex = new($@"silence_end:\s*(?<v>{NumberPattern})", RegexOptions.Compiled);
     private static readonly Regex MeanVolumeRegex = new(@"mean_volume:\s*(?<v>-?\d+(\.\d+)?) dB", RegexOptions.Compiled);
     private static readonly Regex MaxVolumeRegex = new(@"max_volume:\s*(?<v>-?\d+(\.\d+)?) dB", RegexOptions.Compiled);
-    private static readonly Regex ProgressTimeRegex = new(@"^out_time=(?<v>\d{2}:\d{2}:\d{2}(\.\d+)?)$", RegexOptions.Compiled);
+    private static readonly Regex ProgressTimeRegex = new(@"^out_time=(?<h>\d+):(?<m>\d{2}):(?<s>\d{2}(\.\d+)?)$", RegexOptions.Compiled);
+
+    // Seeking a hair past a keyframe makes FFmpeg land on that keyframe instead of the one before it.
+    private const double KeyframeSeekNudge = 0.002;
+
+    // FFmpeg 7 renamed the option that reads a filter graph from a file. Set once the old name is needed.
+    private bool _useLegacyFilterScriptOption;
 
     public string FfmpegPath { get; set; } = "ffmpeg";
     public string FfprobePath { get; set; } = "ffprobe";
@@ -120,19 +151,69 @@ public sealed class FfmpegService
         return false;
     }
 
-    public async Task<double> GetDurationAsync(string file, CancellationToken ct = default)
+    /// <summary>Reads duration, frame rate, and stream layout with a single FFprobe call.</summary>
+    public async Task<MediaInfo> ProbeAsync(string file, CancellationToken ct = default)
     {
         var result = await ProcessRunner.RunAsync(FfprobePath,
-            $"-v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {Q(file)}", ct);
+            $"-v error -show_entries format=duration,start_time:stream=codec_type,avg_frame_rate,r_frame_rate,start_time:stream_disposition=attached_pic -of json {Q(file)}", ct);
 
-        if (double.TryParse(result.StdOut.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var sec))
-            return sec;
+        return ParseProbe(result.StdOut);
+    }
 
-        var fallback = await ProcessRunner.RunAsync(FfmpegPath, $"-i {Q(file)} -f null -", ct);
-        var m = DurationRegex.Match(fallback.StdErr);
-        if (!m.Success) throw new InvalidOperationException("Could not read clip duration. Make sure FFmpeg/FFprobe is installed and available in PATH.");
+    public static MediaInfo ParseProbe(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
 
-        return int.Parse(m.Groups["h"].Value) * 3600 + int.Parse(m.Groups["m"].Value) * 60 + double.Parse(m.Groups["s"].Value, CultureInfo.InvariantCulture);
+            var duration = 0d;
+            var formatStart = 0d;
+            if (root.TryGetProperty("format", out var format))
+            {
+                duration = ReadDouble(format, "duration") ?? 0;
+                formatStart = ReadDouble(format, "start_time") ?? 0;
+            }
+
+            var hasVideo = false;
+            var hasAudio = false;
+            var frameRate = 0d;
+            var isConstant = false;
+            var firstFrameTime = 0d;
+
+            if (root.TryGetProperty("streams", out var streams) && streams.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var stream in streams.EnumerateArray())
+                {
+                    var type = ReadString(stream, "codec_type");
+                    if (type == "audio")
+                    {
+                        hasAudio = true;
+                    }
+                    else if (type == "video" && !hasVideo && !IsAttachedPicture(stream))
+                    {
+                        hasVideo = true;
+                        var realRate = ParseRate(ReadString(stream, "r_frame_rate"));
+                        var averageRate = ParseRate(ReadString(stream, "avg_frame_rate"));
+
+                        // The two rates agree on constant frame rate footage and drift apart on variable frame rate footage.
+                        isConstant = realRate > 0 && averageRate > 0 && Math.Abs(realRate - averageRate) <= averageRate * 0.005;
+                        frameRate = isConstant ? realRate : averageRate > 0 ? averageRate : realRate;
+
+                        // FFmpeg shifts every stream so the earliest one starts at zero, so the first frame sits at this offset.
+                        var streamStart = ReadDouble(stream, "start_time");
+                        if (streamStart.HasValue)
+                            firstFrameTime = Math.Max(0, streamStart.Value - formatStart);
+                    }
+                }
+            }
+
+            return new MediaInfo(Math.Max(0, duration), formatStart, hasVideo, hasAudio, frameRate, isConstant, firstFrameTime);
+        }
+        catch (JsonException)
+        {
+            return MediaInfo.Unknown;
+        }
     }
 
     public async Task<(List<TimelineSegment> Segments, double AdaptiveThresholdDb)> DetectSegmentsAsync(
@@ -144,88 +225,151 @@ public sealed class FfmpegService
         CancellationToken ct = default,
         Action<string, double>? progress = null)
     {
-        var duration = await GetDurationAsync(file, ct);
-        var adaptiveThreshold = thresholdDb;
+        var info = await ProbeAsync(file, ct);
+        if (info.HasVideo && !info.HasAudio)
+            throw new InvalidOperationException("This clip has no audio track, so there are no pauses to detect.");
+
+        // One audio-only pass finds the pauses at the manual threshold and, in adaptive mode, measures
+        // loudness at the same time. A second pass is only needed when the suggestion ends up above
+        // the manual threshold.
+        var duration = info.DurationSeconds;
+        var stage = "Finding pauses";
+        var scan = await ScanAudioAsync(file, thresholdDb, minSilenceSeconds, useAdaptiveThreshold, duration, ct,
+            value => progress?.Invoke(stage, value));
+
+        // Some recordings (browser-made WebM, for example) do not store a duration. The scan has just read to the end.
+        if (duration <= 0)
+            duration = scan.EndTime;
+        if (duration <= 0)
+            throw new InvalidOperationException("Could not read clip duration. Make sure FFmpeg/FFprobe is installed and available in PATH.");
+
+        var threshold = thresholdDb;
         if (useAdaptiveThreshold)
         {
-            adaptiveThreshold = await GetAdaptiveThresholdDbAsync(file, ct, value =>
-                progress?.Invoke("Analyzing audio profile", value * 0.5));
-            adaptiveThreshold = Math.Max(thresholdDb, adaptiveThreshold);
+            threshold = Math.Max(thresholdDb, SuggestThresholdDb(scan.MeanVolumeDb, scan.MaxVolumeDb));
+            if (threshold > thresholdDb + 0.001)
+            {
+                stage = "Refining pauses";
+                scan = await ScanAudioAsync(file, threshold, minSilenceSeconds, measureVolume: false, duration, ct,
+                    value => progress?.Invoke(stage, value));
+            }
         }
 
-        var baseProgress = useAdaptiveThreshold ? 50 : 0;
-        var scaleProgress = useAdaptiveThreshold ? 0.5 : 1;
-        var args = $"-hide_banner -i {Q(file)} -af silencedetect=noise={adaptiveThreshold.ToString(CultureInfo.InvariantCulture)}dB:d={minSilenceSeconds.ToString(CultureInfo.InvariantCulture)} -progress pipe:1 -f null -";
-        var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct, onStdOutLine: line =>
-        {
-            var seconds = TryParseProgressSeconds(line);
-            if (seconds.HasValue)
-                progress?.Invoke("Finding pauses", baseProgress + Math.Clamp(seconds.Value / Math.Max(duration, 0.1) * 100, 0, 99) * scaleProgress);
-        });
+        progress?.Invoke(stage, 100);
+        return (CutPlanner.BuildTimeline(duration, scan.Silences, keepPaddingSeconds), threshold);
+    }
 
-        var silenceRanges = new List<(double Start, double End)>();
+    /// <summary>Suggests a silence threshold from the measured loudness of a recording.</summary>
+    public static double SuggestThresholdDb(double? meanVolumeDb, double? maxVolumeDb)
+    {
+        var meanValue = meanVolumeDb ?? -35;
+        var maxValue = maxVolumeDb ?? -1;
+
+        var suggested = Math.Clamp(meanValue - 14, -55, -18);
+        suggested = Math.Min(suggested, maxValue - 6);
+        return Math.Clamp(suggested, -55, -18);
+    }
+
+    /// <summary>
+    /// Reads the silences FFmpeg's silencedetect filter reported. A silence still open at the end of
+    /// the log runs to the end of the clip and is returned with an infinite end.
+    /// </summary>
+    public static List<TimeRange> ParseSilences(string log)
+    {
+        var silences = new List<TimeRange>();
         double? pendingStart = null;
 
-        foreach (var line in result.StdErr.Split('\n'))
+        foreach (var line in log.Split('\n'))
         {
-            var ss = SilenceStartRegex.Match(line);
-            if (ss.Success) pendingStart = Parse(ss.Groups["v"].Value);
+            var start = SilenceStartRegex.Match(line);
+            if (start.Success)
+                pendingStart = Math.Max(0, Parse(start.Groups["v"].Value));
 
-            var se = SilenceEndRegex.Match(line);
-            if (se.Success && pendingStart.HasValue)
+            var end = SilenceEndRegex.Match(line);
+            if (end.Success && pendingStart.HasValue)
             {
-                var end = Parse(se.Groups["v"].Value);
-                silenceRanges.Add((Math.Max(0, pendingStart.Value + keepPaddingSeconds), Math.Min(duration, end - keepPaddingSeconds)));
+                silences.Add(new TimeRange(pendingStart.Value, Parse(end.Groups["v"].Value)));
                 pendingStart = null;
             }
         }
 
         if (pendingStart.HasValue)
-            silenceRanges.Add((Math.Max(0, pendingStart.Value + keepPaddingSeconds), duration));
+            silences.Add(new TimeRange(pendingStart.Value, double.PositiveInfinity));
 
-        silenceRanges = silenceRanges.Where(x => x.End > x.Start).OrderBy(x => x.Start).ToList();
-        progress?.Invoke("Finding pauses", 100);
-        return (BuildFullTimeline(duration, silenceRanges), adaptiveThreshold);
+        return silences;
     }
 
-    public async Task<double> GetAdaptiveThresholdDbAsync(string file, CancellationToken ct = default, Action<double>? progress = null)
+    private sealed record AudioScan(List<TimeRange> Silences, double? MeanVolumeDb, double? MaxVolumeDb, double EndTime);
+
+    private async Task<AudioScan> ScanAudioAsync(
+        string file,
+        double thresholdDb,
+        double minSilenceSeconds,
+        bool measureVolume,
+        double duration,
+        CancellationToken ct,
+        Action<double>? progress)
     {
-        var duration = progress is null ? 0 : await GetDurationAsync(file, ct);
-        var result = await ProcessRunner.RunAsync(FfmpegPath, $"-hide_banner -i {Q(file)} -af volumedetect -progress pipe:1 -f null -", ct, onStdOutLine: line =>
+        var filter = $"silencedetect=noise={F(thresholdDb)}dB:d={F(minSilenceSeconds)}";
+        if (measureVolume)
+            filter = "volumedetect," + filter;
+
+        // Mapping only the audio stream keeps FFmpeg from decoding the picture, which is where
+        // nearly all of the analysis time used to go.
+        var args = $"-nostdin -hide_banner -nostats -i {Q(file)} -map 0:a:0 -af {filter} -progress pipe:1 -f null -";
+        var endTime = 0d;
+        var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct, onStdOutLine: line =>
         {
-            if (duration <= 0)
+            var seconds = TryParseProgressSeconds(line);
+            if (!seconds.HasValue)
                 return;
 
-            var seconds = TryParseProgressSeconds(line);
-            if (seconds.HasValue)
-                progress?.Invoke(Math.Clamp(seconds.Value / Math.Max(duration, 0.1) * 100, 0, 99));
+            endTime = Math.Max(endTime, seconds.Value);
+            if (duration > 0)
+                progress?.Invoke(Math.Clamp(seconds.Value / duration * 100, 0, 99));
         });
+
+        var silences = ParseSilences(result.StdErr);
+        if (result.ExitCode != 0 && endTime <= 0 && silences.Count == 0)
+            throw new InvalidOperationException(ErrorTail(result.StdErr));
+
         var mean = MeanVolumeRegex.Match(result.StdErr);
         var max = MaxVolumeRegex.Match(result.StdErr);
-
-        var meanValue = mean.Success ? Parse(mean.Groups["v"].Value) : -35;
-        var maxValue = max.Success ? Parse(max.Groups["v"].Value) : -1;
-
-        var suggested = Math.Clamp(meanValue - 14, -55, -18);
-        suggested = Math.Min(suggested, maxValue - 6);
-        progress?.Invoke(100);
-        return Math.Clamp(suggested, -55, -18);
+        return new AudioScan(
+            silences,
+            mean.Success ? Parse(mean.Groups["v"].Value) : null,
+            max.Success ? Parse(max.Groups["v"].Value) : null,
+            endTime);
     }
 
     public async Task<string?> ExtractClipThumbnailAsync(string inputFile, CancellationToken ct = default)
     {
         var tempFolder = Path.Combine(Path.GetTempPath(), "silence-cutter-thumbnails");
         Directory.CreateDirectory(tempFolder);
-        var outputFile = Path.Combine(tempFolder, Path.GetFileNameWithoutExtension(inputFile) + "_thumb.jpg");
-        var args = $"-y -hide_banner -ss 2 -i {Q(inputFile)} -frames:v 1 -vf scale=220:-2 {Q(outputFile)}";
-        var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct);
-        if (result.ExitCode != 0 || !File.Exists(outputFile))
-            return null;
 
-        return outputFile;
+        // The path hash keeps two clips with the same file name in different folders from sharing a thumbnail.
+        var pathHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(inputFile))), 0, 6);
+        var outputFile = Path.Combine(tempFolder, $"{Path.GetFileNameWithoutExtension(inputFile)}_{pathHash}_thumb.jpg");
+
+        // Two seconds in usually skips a black first frame; clips shorter than that fall back to the first frame.
+        foreach (var seek in new[] { "2", "0" })
+        {
+            try { File.Delete(outputFile); } catch { }
+            var args = $"-nostdin -y -hide_banner -loglevel error -ss {seek} -i {Q(inputFile)} -an -sn -dn -frames:v 1 -vf scale=220:-2 {Q(outputFile)}";
+            var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct);
+            if (result.ExitCode == 0 && File.Exists(outputFile))
+                return outputFile;
+        }
+
+        return null;
     }
 
-    public async Task ExportCutVideoAsync(
+    /// <summary>
+    /// Renders the clip without the sections marked for removal. With <paramref name="reencode"/> the
+    /// cuts are frame-accurate; without it the streams are copied untouched and cuts can only start on
+    /// keyframes.
+    /// </summary>
+    public async Task<CutExportResult> ExportCutVideoAsync(
         string inputFile,
         IEnumerable<TimelineSegment> segments,
         string outputFile,
@@ -233,98 +377,201 @@ public sealed class FfmpegService
         CancellationToken ct = default,
         Action<double>? progress = null)
     {
-        var keep = segments.Where(s => !s.Remove).OrderBy(s => s.Start).ToList();
-        if (keep.Count == 0) throw new InvalidOperationException("No segments left to export.");
+        var kept = CutPlanner.MergeKeptRanges(segments);
+        if (kept.Count == 0) throw new InvalidOperationException("No segments left to export.");
 
-        if (reencode)
+        // Render next to the destination and rename at the end, so a failed or cancelled export never
+        // leaves a broken file under the chosen name or destroys a file that was already there.
+        EnsureCanReplace(outputFile);
+        var workingFile = WorkingPathFor(outputFile);
+        double exportedSeconds;
+        try
         {
-            await ExportCutVideoWithFilterAsync(inputFile, keep, outputFile, ct, progress);
-            return;
+            exportedSeconds = reencode
+                ? await ExportCutVideoWithFilterAsync(inputFile, kept, workingFile, ct, progress)
+                : await ExportCutVideoWithStreamCopyAsync(inputFile, kept, workingFile, ct, progress);
+        }
+        catch
+        {
+            TryDeleteFile(workingFile);
+            throw;
         }
 
-        await ExportCutVideoWithSegmentConcatAsync(inputFile, keep, outputFile, ct, progress);
+        try
+        {
+            File.Move(workingFile, outputFile, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // The render is complete, so keep it rather than throwing the work away.
+            throw new InvalidOperationException(
+                $"The export finished, but \"{Path.GetFileName(outputFile)}\" could not be replaced. The video was saved as \"{Path.GetFileName(workingFile)}\" in the same folder.", ex);
+        }
+
+        progress?.Invoke(100);
+        return new CutExportResult(kept.Sum(r => r.Duration), exportedSeconds);
     }
 
-    private async Task ExportCutVideoWithFilterAsync(
+    /// <summary>Fails before a long render starts if the existing destination file is locked.</summary>
+    private static void EnsureCanReplace(string outputFile)
+    {
+        if (!File.Exists(outputFile))
+            return;
+
+        try
+        {
+            using var stream = new FileStream(outputFile, FileMode.Open, FileAccess.Write, FileShare.None);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidOperationException(
+                $"\"{Path.GetFileName(outputFile)}\" is open in another app or cannot be written. Close it or choose a different name.", ex);
+        }
+    }
+
+    private async Task<double> ExportCutVideoWithFilterAsync(
         string inputFile,
-        IReadOnlyList<TimelineSegment> keep,
+        IReadOnlyList<TimeRange> kept,
         string outputFile,
         CancellationToken ct,
         Action<double>? progress)
     {
-        var temp = Path.Combine(Path.GetTempPath(), "silence-cutter-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(temp);
+        // Constant frame rate footage gets its cuts moved onto frame boundaries. Variable frame rate
+        // footage has no fixed grid to snap to, so its cuts keep the requested times.
+        var info = await ProbeAsync(inputFile, ct);
+        var spans = CutPlanner.PlanFrameAccurateCuts(kept, info.IsConstantFrameRate ? info.FrameRate : 0, info.FirstVideoFrameTime);
+        if (spans.Count == 0) throw new InvalidOperationException("No segments left to export.");
 
+        var temp = CreateTempFolder();
         try
         {
             var filterFile = Path.Combine(temp, "cut-filter.txt");
-            var filter = new StringBuilder();
+            await File.WriteAllTextAsync(filterFile, CutPlanner.BuildFilterGraph(spans, CutPlanner.DefaultFadeSeconds, info.DurationSeconds), ct);
 
-            for (var i = 0; i < keep.Count; i++)
-            {
-                var start = F(keep[i].Start);
-                var end = F(keep[i].End);
-                filter.AppendLine($"[0:v:0]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{i}];");
-                filter.AppendLine($"[0:a:0]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{i}];");
-            }
+            var totalDuration = Math.Max(spans.Sum(s => s.Duration), 0.1);
+            var result = await RunWithFilterGraphFileAsync(
+                filterFile,
+                filterOption => $"-nostdin -y -hide_banner -loglevel error -i {Q(inputFile)} {filterOption} -map \"[v]\" -map \"[a]\" {EncodeArgs(outputFile)} -progress pipe:1 {Q(outputFile)}",
+                ct,
+                line =>
+                {
+                    var seconds = TryParseProgressSeconds(line);
+                    if (seconds.HasValue)
+                        progress?.Invoke(Math.Clamp(seconds.Value / totalDuration * 100, 0, 99));
+                });
 
-            for (var i = 0; i < keep.Count; i++)
-                filter.Append($"[v{i}][a{i}]");
-
-            filter.AppendLine($"concat=n={keep.Count}:v=1:a=1[v][a]");
-            await File.WriteAllTextAsync(filterFile, filter.ToString(), ct);
-
-            var totalDuration = Math.Max(keep.Sum(s => s.Duration), 0.1);
-            var args = $"-y -i {Q(inputFile)} -filter_complex_script {Q(filterFile)} -map \"[v]\" -map \"[a]\" -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p -c:a aac -b:a 192k -movflags +faststart -progress pipe:1 {Q(outputFile)}";
-            var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct, onStdOutLine: line =>
-            {
-                var seconds = TryParseProgressSeconds(line);
-                if (seconds.HasValue)
-                    progress?.Invoke(Math.Clamp(seconds.Value / totalDuration * 100, 0, 99));
-            });
-            if (result.ExitCode != 0) throw new InvalidOperationException(result.StdErr);
-            progress?.Invoke(100);
+            if (result.ExitCode != 0) throw new InvalidOperationException(ErrorTail(result.StdErr));
+            return totalDuration;
         }
-        finally { try { Directory.Delete(temp, true); } catch { } }
+        finally { TryDeleteFolder(temp); }
     }
 
-    private async Task ExportCutVideoWithSegmentConcatAsync(
+    private async Task<ProcessResult> RunWithFilterGraphFileAsync(
+        string filterFile,
+        Func<string, string> buildArgs,
+        CancellationToken ct,
+        Action<string> onStdOutLine)
+    {
+        if (!_useLegacyFilterScriptOption)
+        {
+            var result = await ProcessRunner.RunAsync(FfmpegPath, buildArgs($"-/filter_complex {Q(filterFile)}"), ct, onStdOutLine: onStdOutLine);
+            if (result.ExitCode == 0 || !result.StdErr.Contains("/filter_complex", StringComparison.Ordinal))
+                return result;
+
+            // FFmpeg older than 7.0 rejects the option by name; it only knows the previous spelling.
+            _useLegacyFilterScriptOption = true;
+        }
+
+        return await ProcessRunner.RunAsync(FfmpegPath, buildArgs($"-filter_complex_script {Q(filterFile)}"), ct, onStdOutLine: onStdOutLine);
+    }
+
+    private async Task<double> ExportCutVideoWithStreamCopyAsync(
         string inputFile,
-        IReadOnlyList<TimelineSegment> keep,
+        IReadOnlyList<TimeRange> kept,
         string outputFile,
         CancellationToken ct,
         Action<double>? progress)
     {
-        var temp = Path.Combine(Path.GetTempPath(), "silence-cutter-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(temp);
+        // A copied stream can only start on a keyframe. Starting anywhere else makes FFmpeg back up to
+        // the previous keyframe, which replays footage that was already written.
+        var keyframes = await GetKeyframeTimesAsync(inputFile, ct);
+        if (keyframes.Count == 0)
+            throw new InvalidOperationException("Could not read the keyframe positions that stream copy needs. Enable re-encoding to export this clip.");
 
+        var ranges = CutPlanner.AlignToKeyframes(kept, keyframes);
+        var extension = Path.GetExtension(outputFile);
+        if (string.IsNullOrEmpty(extension))
+            extension = ".mp4";
+
+        var temp = CreateTempFolder();
         try
         {
             var parts = new List<string>();
-            for (var i = 0; i < keep.Count; i++)
+            for (var i = 0; i < ranges.Count; i++)
             {
-                var part = Path.Combine(temp, $"part_{i:0000}.mp4");
+                var part = Path.Combine(temp, $"part_{i:0000}{extension}");
                 parts.Add(part);
-                var seek = F(keep[i].Start);
-                var dur = F(keep[i].Duration);
-                var result = await ProcessRunner.RunAsync(FfmpegPath, $"-y -ss {seek} -i {Q(inputFile)} -t {dur} -map 0 -c copy -avoid_negative_ts make_zero {Q(part)}", ct);
-                if (result.ExitCode != 0) throw new InvalidOperationException(result.StdErr);
-                progress?.Invoke((i + 1) / (double)(keep.Count + 1) * 100);
+
+                var seek = ranges[i].Start + KeyframeSeekNudge;
+                var length = Math.Max(ranges[i].End - seek, 0.001);
+                var result = await ProcessRunner.RunAsync(FfmpegPath,
+                    $"-nostdin -y -hide_banner -loglevel error -ss {F(seek)} -i {Q(inputFile)} -t {F(length)} -map 0 -map -0:d -map -0:t -c copy -avoid_negative_ts make_zero {Q(part)}", ct);
+                if (result.ExitCode != 0) throw new InvalidOperationException(ErrorTail(result.StdErr));
+                progress?.Invoke((i + 1) / (double)(ranges.Count + 1) * 100);
             }
 
             var listFile = Path.Combine(temp, "concat.txt");
             await File.WriteAllLinesAsync(listFile, parts.Select(p => $"file '{p.Replace("'", "'\\''")}'"), ct);
-            var concat = await ProcessRunner.RunAsync(FfmpegPath, $"-y -f concat -safe 0 -i {Q(listFile)} -c copy {Q(outputFile)}", ct);
-            if (concat.ExitCode != 0) throw new InvalidOperationException(concat.StdErr);
-            progress?.Invoke(100);
+            var fastStart = IsMp4Family(outputFile) ? " -movflags +faststart" : "";
+            var concat = await ProcessRunner.RunAsync(FfmpegPath,
+                $"-nostdin -y -hide_banner -loglevel error -f concat -safe 0 -i {Q(listFile)} -map 0 -c copy{fastStart} {Q(outputFile)}", ct);
+            if (concat.ExitCode != 0) throw new InvalidOperationException(ErrorTail(concat.StdErr));
+
+            return ranges.Sum(r => r.Duration);
         }
-        finally { try { Directory.Delete(temp, true); } catch { } }
+        finally { TryDeleteFolder(temp); }
     }
 
+    /// <summary>Lists the keyframe timestamps of the main video stream without decoding it.</summary>
+    public async Task<IReadOnlyList<double>> GetKeyframeTimesAsync(string file, CancellationToken ct = default)
+    {
+        var info = await ProbeAsync(file, ct);
+        var result = await ProcessRunner.RunAsync(FfprobePath,
+            $"-v error -select_streams V:0 -show_entries packet=pts_time,flags -of csv=p=0 {Q(file)}", ct);
+
+        return ParseKeyframeTimes(result.StdOut, info.StartTime);
+    }
+
+    /// <summary>
+    /// Reads FFprobe's "pts_time,flags" packet listing. <paramref name="startTime"/> is the container
+    /// start time, which FFmpeg subtracts from every timestamp when it seeks and cuts.
+    /// </summary>
+    public static List<double> ParseKeyframeTimes(string packetListing, double startTime = 0)
+    {
+        var times = new SortedSet<double>();
+
+        foreach (var line in packetListing.Split('\n'))
+        {
+            var fields = line.Trim().Split(',');
+            if (fields.Length < 2 || !fields[1].Contains('K'))
+                continue;
+
+            if (double.TryParse(fields[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var time))
+                times.Add(Math.Max(0, time - startTime));
+        }
+
+        return times.ToList();
+    }
+
+    /// <summary>
+    /// Exports every removed pause as its own file. With <paramref name="reencode"/> each clip starts
+    /// and ends on the exact frame; without it the streams are copied and clips start on a keyframe.
+    /// </summary>
     public async Task ExportPausesOnlyAsync(
         string inputFile,
         IEnumerable<TimelineSegment> segments,
         string outputFolder,
+        bool reencode,
         CancellationToken ct = default,
         Action<double>? progress = null)
     {
@@ -340,9 +587,10 @@ public sealed class FfmpegService
         {
             var s = pauses[i];
             var outFile = Path.Combine(outputFolder, $"pause_{i + 1:000}_{TimelineSegment.TimeFmt(s.Start).Replace(':','-')}.mp4");
+            var codecArgs = reencode ? $"-map 0:v:0 -map 0:a:0? {EncodeArgs(outFile)}" : "-c copy";
             var result = await ProcessRunner.RunAsync(FfmpegPath,
-                $"-y -ss {s.Start.ToString(CultureInfo.InvariantCulture)} -i {Q(inputFile)} -t {s.Duration.ToString(CultureInfo.InvariantCulture)} -c copy {Q(outFile)}", ct);
-            if (result.ExitCode != 0) throw new InvalidOperationException(result.StdErr);
+                $"-nostdin -y -hide_banner -loglevel error -ss {F(s.Start)} -i {Q(inputFile)} -t {F(s.Duration)} {codecArgs} {Q(outFile)}", ct);
+            if (result.ExitCode != 0) throw new InvalidOperationException(ErrorTail(result.StdErr));
             progress?.Invoke((i + 1) / (double)pauses.Count * 100);
         }
     }
@@ -356,11 +604,12 @@ public sealed class FfmpegService
     {
         Directory.CreateDirectory(outputFolder);
 
+        // -ss ahead of -i jumps straight to the segment. After -i, FFmpeg would decode the whole clip up to that point first.
         var outputPattern = Path.Combine(outputFolder, "frame_%04d.jpg");
-        var args = $"-y -i {Q(inputFile)} -ss {F(segment.Start)} -t {F(segment.Duration)} -vf fps={fps},scale=960:-2 -q:v 3 {Q(outputPattern)}";
+        var args = $"-nostdin -y -hide_banner -loglevel error -ss {F(segment.Start)} -t {F(segment.Duration)} -i {Q(inputFile)} -an -sn -dn -vf fps={fps},scale=960:-2 -q:v 3 {Q(outputPattern)}";
         var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct);
         if (result.ExitCode != 0)
-            throw new InvalidOperationException(result.StdErr);
+            throw new InvalidOperationException(ErrorTail(result.StdErr));
 
         return Directory.GetFiles(outputFolder, "frame_*.jpg").OrderBy(x => x).ToList();
     }
@@ -377,10 +626,13 @@ public sealed class FfmpegService
         count = Math.Clamp(count, 1, 10);
         var fps = Math.Clamp(count / Math.Max(segment.Duration, 0.1), 0.15, 6);
         var outputPattern = Path.Combine(outputFolder, "thumb_%03d.jpg");
-        var args = $"-y -hide_banner -i {Q(inputFile)} -ss {F(segment.Start)} -t {F(segment.Duration)} -vf fps={F(fps)},scale=120:68:force_original_aspect_ratio=increase,crop=120:68 -frames:v {count} -q:v 5 {Q(outputPattern)}";
+
+        // Seeking before -i jumps straight to the segment, and skipping frames nothing else depends on
+        // cuts the decoding work by about a quarter without changing which picture is shown.
+        var args = $"-nostdin -y -hide_banner -loglevel error -skip_frame noref -ss {F(segment.Start)} -t {F(segment.Duration)} -i {Q(inputFile)} -an -sn -dn -vf fps={F(fps)},scale=120:68:force_original_aspect_ratio=increase,crop=120:68 -frames:v {count} -q:v 5 {Q(outputPattern)}";
         var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct);
         if (result.ExitCode != 0)
-            throw new InvalidOperationException(result.StdErr);
+            throw new InvalidOperationException(ErrorTail(result.StdErr));
 
         return Directory.GetFiles(outputFolder, "thumb_*.jpg").OrderBy(x => x).ToList();
     }
@@ -394,11 +646,10 @@ public sealed class FfmpegService
         Directory.CreateDirectory(outputFolder);
 
         var outputFile = Path.Combine(outputFolder, "preview-audio.wav");
-        var filter = $"atrim=start={F(segment.Start)}:end={F(segment.End)},asetpts=PTS-STARTPTS";
-        var args = $"-y -hide_banner -i {Q(inputFile)} -vn -af {Q(filter)} -ac 2 -ar 48000 -c:a pcm_s16le {Q(outputFile)}";
+        var args = $"-nostdin -y -hide_banner -loglevel error -ss {F(segment.Start)} -t {F(segment.Duration)} -i {Q(inputFile)} -vn -sn -dn -ac 2 -ar 48000 -c:a pcm_s16le {Q(outputFile)}";
         var result = await ProcessRunner.RunAsync(FfmpegPath, args, ct);
         if (result.ExitCode != 0 || !File.Exists(outputFile))
-            throw new InvalidOperationException(result.StdErr);
+            throw new InvalidOperationException(ErrorTail(result.StdErr));
 
         return outputFile;
     }
@@ -417,28 +668,104 @@ public sealed class FfmpegService
         return process ?? throw new InvalidOperationException("Could not start preview audio.");
     }
 
-    private static List<TimelineSegment> BuildFullTimeline(double duration, List<(double Start, double End)> silences)
+    private static string EncodeArgs(string outputFile)
     {
-        var list = new List<TimelineSegment>();
-        var cursor = 0d;
-        foreach (var s in silences)
-        {
-            if (s.Start > cursor) list.Add(new TimelineSegment { Kind = SegmentKind.Speech, Start = cursor, End = s.Start, Remove = false });
-            list.Add(new TimelineSegment { Kind = SegmentKind.Silence, Start = s.Start, End = s.End, Remove = true });
-            cursor = s.End;
-        }
-        if (cursor < duration) list.Add(new TimelineSegment { Kind = SegmentKind.Speech, Start = cursor, End = duration, Remove = false });
-        return list;
+        const string codecs = "-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p -c:a aac -b:a 192k";
+        return IsMp4Family(outputFile) ? codecs + " -movflags +faststart" : codecs;
+    }
+
+    private static bool IsMp4Family(string file) =>
+        Path.GetExtension(file).ToLowerInvariant() is ".mp4" or ".m4v" or ".mov";
+
+    private static string WorkingPathFor(string outputFile)
+    {
+        // The extension stays last because FFmpeg picks the container from it.
+        var folder = Path.GetDirectoryName(Path.GetFullPath(outputFile)) ?? "";
+        var name = Path.GetFileNameWithoutExtension(outputFile);
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        return Path.Combine(folder, $"{name}.partial-{tag}{Path.GetExtension(outputFile)}");
+    }
+
+    private static string CreateTempFolder()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "silence-cutter-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        return temp;
+    }
+
+    private static void TryDeleteFolder(string folder)
+    {
+        try { Directory.Delete(folder, true); } catch { }
+    }
+
+    private static void TryDeleteFile(string file)
+    {
+        try { File.Delete(file); } catch { }
+    }
+
+    /// <summary>The last few lines FFmpeg wrote, which is where it explains a failure.</summary>
+    private static string ErrorTail(string stdErr)
+    {
+        var lines = stdErr
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(line => line.Length > 0 && line != "Conversion failed!")
+            .TakeLast(3)
+            .ToList();
+
+        return lines.Count == 0 ? "FFmpeg failed without an error message." : string.Join(" ", lines);
+    }
+
+    private static bool IsAttachedPicture(JsonElement stream) =>
+        stream.TryGetProperty("disposition", out var disposition) &&
+        disposition.ValueKind == JsonValueKind.Object &&
+        disposition.TryGetProperty("attached_pic", out var attached) &&
+        attached.ValueKind == JsonValueKind.Number &&
+        attached.GetInt32() != 0;
+
+    private static string? ReadString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    private static double? ReadDouble(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var value))
+            return null;
+
+        if (value.ValueKind == JsonValueKind.Number)
+            return value.GetDouble();
+
+        return value.ValueKind == JsonValueKind.String &&
+               double.TryParse(value.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) &&
+               double.IsFinite(parsed)
+            ? parsed
+            : null;
+    }
+
+    private static double ParseRate(string? rate)
+    {
+        if (string.IsNullOrWhiteSpace(rate))
+            return 0;
+
+        var parts = rate.Split('/');
+        if (!double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var numerator))
+            return 0;
+
+        if (parts.Length == 1)
+            return numerator;
+
+        return double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var denominator) && denominator > 0
+            ? numerator / denominator
+            : 0;
     }
 
     private static double Parse(string v) => double.Parse(v, CultureInfo.InvariantCulture);
+
     private static double? TryParseProgressSeconds(string line)
     {
         var match = ProgressTimeRegex.Match(line);
-        if (!match.Success || !TimeSpan.TryParse(match.Groups["v"].Value, CultureInfo.InvariantCulture, out var time))
+        if (!match.Success)
             return null;
 
-        return time.TotalSeconds;
+        return Parse(match.Groups["h"].Value) * 3600 + Parse(match.Groups["m"].Value) * 60 + Parse(match.Groups["s"].Value);
     }
 
     private static string F(double value) => value.ToString("0.######", CultureInfo.InvariantCulture);

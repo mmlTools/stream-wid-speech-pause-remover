@@ -49,7 +49,27 @@ public static class ProcessRunner
         p.Start();
         p.BeginOutputReadLine();
         p.BeginErrorReadLine();
+
+        // Without this the child keeps running after the caller has given up on it: a cancelled
+        // thumbnail, preview, or export would leave FFmpeg working in the background. The kill is
+        // registered on the token so it happens inside Cancel() itself, because during app shutdown
+        // there may be no time left for a continuation to run.
+        await using var killOnCancel = ct.Register(() => TryKill(p));
         await p.WaitForExitAsync(ct);
+
         return new ProcessResult(p.ExitCode, stdout.ToString(), stderr.ToString());
+    }
+
+    private static void TryKill(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+                process.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+            // The process may have exited between the check and the kill.
+        }
     }
 }

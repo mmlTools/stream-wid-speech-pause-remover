@@ -103,15 +103,32 @@ If quiet words are being removed, reduce sensitivity with a less negative thresh
 
 If pauses are missed, increase sensitivity with a more negative threshold such as `-40 dB`, or reduce minimum pause length.
 
+Analysis decodes only the first audio track and never the picture, so long recordings are analyzed quickly. With the adaptive threshold on, loudness is measured in the same pass; a second pass only runs when the suggested threshold ends up above the manual one.
+
+Silence at the very start or end of a clip is cut right up to the edge. Padding is only kept on the side of a pause that touches speech.
+
 ## Export Notes
 
 - **Export Cut Video** renders the selected clip without sections marked for removal.
-- **Export Pauses Only** exports removed pause sections as separate files.
+- **Export Pauses Only** exports removed pause sections as separate files. It follows the re-encode setting: re-encoded pause clips start and end on the exact frame, stream-copied ones start on a keyframe.
 - Cut-video and pause-only exports are added to the export queue, so the selected clip's cut decisions are captured and rendered in the background.
 - **Export EDL Cut List** creates a video-only edit decision list that marks selected sections at their original timeline positions for Resolve or similar workflows.
-- **Export CSV Cut List** writes section timing and removal state for review or post-processing.
-- Re-encoding is recommended for frame-accurate cuts.
-- Stream copy mode is faster, but cuts can land near keyframes instead of exact frames.
+- **Export CSV Cut List** writes section timing and removal state for review or post-processing. Numbers always use a dot as the decimal separator.
+- A cut video is rendered to a `.partial` file next to the destination and renamed when it is complete, so a failed or cancelled export never replaces an existing file with a broken one.
+
+### Re-encode (recommended)
+
+- Cuts land on exact frame boundaries. On constant frame rate footage each cut is moved outward to the nearest frame, so picture and sound cover exactly the same time and stay in sync through every cut. This keeps at most one extra frame on each side of a cut.
+- A 10 ms audio fade is applied on both sides of every cut, which removes the click that a hard cut in the middle of a waveform produces.
+- Kept sections that touch each other are rendered as one piece, so un-marking a pause leaves no cut behind.
+- Video is encoded with x264 (`veryfast`, CRF 18) and audio with AAC at 192 kb/s. The first video and first audio track are exported.
+
+### Stream copy
+
+- Nothing is re-encoded, so there is no quality loss and the export is many times faster.
+- A copied video can only start on a keyframe. Each kept section therefore starts on the keyframe before it, and a pause is only removed when a keyframe falls inside it. Pauses that cannot be removed without repeating footage stay in, and the app reports how many seconds that was.
+- How much gets removed depends on the recording: footage with a keyframe every second or two cuts well, footage with a keyframe every 8-10 seconds keeps most of its pauses. Use re-encode when the cuts matter.
+- Each join can show a few extra frames and a very short audio gap.
 
 ## Current Scope
 

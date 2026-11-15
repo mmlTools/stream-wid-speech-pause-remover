@@ -11,4 +11,13 @@ public partial class TimelineSegmentBlock : ObservableObject
     public string ToolTip => $"{Segment.Label} - {Label}";
 
     [ObservableProperty] private double width;
+
+    /// <summary>Refreshes the cut/keep appearance after the segment's removal state changed.</summary>
+    public void NotifySegmentChanged()
+    {
+        OnPropertyChanged(nameof(Label));
+        OnPropertyChanged(nameof(Background));
+        OnPropertyChanged(nameof(Accent));
+        OnPropertyChanged(nameof(ToolTip));
+    }
 }

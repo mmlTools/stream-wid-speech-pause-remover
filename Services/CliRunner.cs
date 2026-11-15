@@ -95,7 +95,7 @@ public static class CliRunner
             if (options.ExportMode == CliExportMode.PausesOnly)
             {
                 var outputFolder = options.OutputPath ?? BuildOutputFolder(options.InputFile, "_pauses");
-                await ffmpeg.ExportPausesOnlyAsync(options.InputFile, result.Segments, outputFolder, ct, p => PrintProgress(output, "Exporting", p));
+                await ffmpeg.ExportPausesOnlyAsync(options.InputFile, result.Segments, outputFolder, settings.ReencodeExports, ct, p => PrintProgress(output, "Exporting", p));
                 await output.WriteLineAsync();
                 await output.WriteLineAsync($"Pause clips written: {outputFolder}");
                 await output.FlushAsync();
@@ -103,9 +103,11 @@ public static class CliRunner
             }
 
             var cutFile = options.OutputPath ?? BuildOutputPath(options.InputFile, "_cut.mp4");
-            await ffmpeg.ExportCutVideoAsync(options.InputFile, result.Segments, cutFile, settings.ReencodeExports, ct, p => PrintProgress(output, "Exporting", p));
+            var cut = await ffmpeg.ExportCutVideoAsync(options.InputFile, result.Segments, cutFile, settings.ReencodeExports, ct, p => PrintProgress(output, "Exporting", p));
             await output.WriteLineAsync();
             await output.WriteLineAsync($"Cut video written: {cutFile}");
+            if (!settings.ReencodeExports && cut.ExtraSeconds >= 0.5)
+                await output.WriteLineAsync($"Stream copy left {cut.ExtraSeconds:0.#}s of pauses in because cuts can only start on keyframes. Use --reencode for exact cuts.");
             await output.FlushAsync();
             return 0;
         }
@@ -133,7 +135,7 @@ public static class CliRunner
           --adaptive             Use adaptive threshold suggestions
           --no-adaptive          Use the manual threshold exactly
           --reencode             Export frame-accurate re-encoded cuts
-          --stream-copy          Export faster keyframe-based cuts
+          --stream-copy          Export without re-encoding; cuts can only start on keyframes
           --output <path>        Output file or folder
           --pauses-only          Export removed pauses as separate clips
           --edl                  Export an EDL cut list
@@ -174,7 +176,9 @@ public static class CliRunner
 
     private static void PrintProgress(TextWriter output, string label, double progress)
     {
-        output.Write($"\r{label}... {Math.Clamp(progress, 0, 100):0}%");
+        // Padded so a shorter line fully overwrites the one before it.
+        var line = $"{label}... {Math.Clamp(progress, 0, 100):0}%";
+        output.Write("\r" + line.PadRight(40));
         output.Flush();
     }
 

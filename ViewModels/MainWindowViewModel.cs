@@ -32,7 +32,10 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly UpdateChecker _updateChecker = new("mmlTools", "StreamWID");
     private readonly AppSettings _settings = AppSettings.Load();
     private readonly List<TimelineSegment> _watchedSegments = new();
+    private readonly Dictionary<TimelineSegment, TimelineSegmentBlock> _blocksBySegment = new();
     private readonly SemaphoreSlim _exportSemaphore = new(1, 1);
+    private readonly CancellationTokenSource _exportCts = new();
+    private static readonly int ThumbnailWorkers = Math.Clamp(Environment.ProcessorCount / 2, 2, 4);
     private readonly DispatcherTimer _previewTimer = new() { Interval = TimeSpan.FromMilliseconds(125) };
     private readonly List<string> _previewFrames = new();
     private CancellationTokenSource? _previewCts;
@@ -482,8 +485,9 @@ public partial class MainWindowViewModel : ObservableObject
 
     public void Shutdown()
     {
+        // Stops FFmpeg for any export still running, so nothing keeps rendering after the window is gone.
+        _exportCts.Cancel();
         _thumbnailCts?.Cancel();
-        _thumbnailCts?.Dispose();
         _thumbnailCts = null;
         ClosePreview();
     }
@@ -521,7 +525,7 @@ public partial class MainWindowViewModel : ObservableObject
     private void ClearCompletedExports()
     {
         var removable = ExportQueue
-            .Where(x => x.Status is "Done" or "Failed")
+            .Where(x => x.Status is "Done" or "Failed" or "Canceled")
             .ToList();
 
         foreach (var item in removable)
@@ -716,20 +720,27 @@ public partial class MainWindowViewModel : ObservableObject
                     job.QueueItem.Progress = Math.Clamp(value, 0, 100));
             }
 
+            var token = _exportCts.Token;
+            CutExportResult? cutResult = null;
             if (job.Kind == ExportJobKind.CutVideo)
-                await _ffmpeg.ExportCutVideoAsync(job.InputFile, job.Segments, job.OutputPath, job.Reencode, progress: ReportProgress);
+                cutResult = await _ffmpeg.ExportCutVideoAsync(job.InputFile, job.Segments, job.OutputPath, job.Reencode, token, ReportProgress);
             else
-                await _ffmpeg.ExportPausesOnlyAsync(job.InputFile, job.Segments, job.OutputPath, progress: ReportProgress);
+                await _ffmpeg.ExportPausesOnlyAsync(job.InputFile, job.Segments, job.OutputPath, job.Reencode, token, ReportProgress);
 
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
                 job.QueueItem.Status = "Done";
                 job.QueueItem.Progress = 100;
-                Status = job.Kind == ExportJobKind.CutVideo
-                    ? $"Exported cut video for {job.QueueItem.ClipName}."
+                Status = cutResult is not null
+                    ? DescribeCutExport(job, cutResult)
                     : $"Exported pause clips for {job.QueueItem.ClipName}.";
                 NotifyExportCompleted(job.OutputPath);
             });
+        }
+        catch (OperationCanceledException)
+        {
+            // Only happens while the app is closing, so there is nobody left to wait for.
+            Dispatcher.UIThread.Post(() => job.QueueItem.Status = "Canceled");
         }
         catch (Exception ex)
         {
@@ -746,6 +757,15 @@ public partial class MainWindowViewModel : ObservableObject
         {
             _exportSemaphore.Release();
         }
+    }
+
+    private static string DescribeCutExport(ExportJob job, CutExportResult result)
+    {
+        // Stream copy can only start a cut on a keyframe, so tell the user when pauses had to stay in.
+        if (!job.Reencode && result.ExtraSeconds >= 0.5)
+            return $"Exported {job.QueueItem.ClipName} with stream copy. {result.ExtraSeconds:0.#}s of pauses stayed in because cuts can only start on keyframes. Re-encode for exact cuts.";
+
+        return $"Exported cut video for {job.QueueItem.ClipName}.";
     }
 
     private static IReadOnlyList<TimelineSegment> CloneSegments(IEnumerable<TimelineSegment> segments) =>
@@ -794,7 +814,13 @@ public partial class MainWindowViewModel : ObservableObject
     {
         if (e.PropertyName == nameof(TimelineSegment.Remove))
         {
-            RefreshTimelineBlocks();
+            // Only this segment's block changes colour. Rebuilding the whole track here made
+            // "select all" on a long clip rebuild every block once per segment.
+            if (sender is TimelineSegment segment && _blocksBySegment.TryGetValue(segment, out var block))
+                block.NotifySegmentChanged();
+            else
+                RefreshTimelineBlocks();
+
             NotifySelectionStateChanged();
         }
     }
@@ -809,6 +835,7 @@ public partial class MainWindowViewModel : ObservableObject
     private void RefreshTimelineBlocks()
     {
         TimelineBlocks.Clear();
+        _blocksBySegment.Clear();
 
         if (SelectedClip is null || SelectedClip.Segments.Count == 0)
             return;
@@ -819,11 +846,14 @@ public partial class MainWindowViewModel : ObservableObject
 
         foreach (var segment in SelectedClip.Segments)
         {
-            TimelineBlocks.Add(new TimelineSegmentBlock
+            var block = new TimelineSegmentBlock
             {
                 Segment = segment,
                 Width = Math.Max(8, segment.Duration / duration * _timelineTrackWidth)
-            });
+            };
+
+            _blocksBySegment[segment] = block;
+            TimelineBlocks.Add(block);
         }
     }
 
@@ -836,7 +866,6 @@ public partial class MainWindowViewModel : ObservableObject
     private async Task LoadTimelineThumbnailsAsync(MediaClip? clip)
     {
         _thumbnailCts?.Cancel();
-        _thumbnailCts?.Dispose();
         _thumbnailCts = null;
 
         if (clip is null || clip.Segments.Count == 0)
@@ -846,50 +875,61 @@ public partial class MainWindowViewModel : ObservableObject
             segment.ClearThumbnails();
 
         var cts = new CancellationTokenSource();
+        var token = cts.Token;
         _thumbnailCts = cts;
         var folder = Path.Combine(Path.GetTempPath(), "silence-cutter-track-" + Guid.NewGuid().ToString("N"));
 
         try
         {
             Status = "Building thumbnail track...";
-            var duration = Math.Max(clip.Segments.Sum(x => x.Duration), 0.1);
+            var segments = clip.Segments.ToList();
+            var duration = Math.Max(segments.Sum(x => x.Duration), 0.1);
+            var trackWidth = _timelineTrackWidth;
             var failedThumbnailCount = 0;
 
-            for (var i = 0; i < clip.Segments.Count; i++)
-            {
-                cts.Token.ThrowIfCancellationRequested();
-                var segment = clip.Segments[i];
-                var segmentWidth = segment.Duration / duration * _timelineTrackWidth;
-                var thumbnailCount = Math.Clamp((int)Math.Ceiling(segmentWidth / 72), 1, 8);
-                var segmentFolder = Path.Combine(folder, i.ToString("0000"));
+            // A few segments are extracted at once. Each FFmpeg call seeks straight to its segment, so they do not compete for much.
+            await Parallel.ForEachAsync(
+                Enumerable.Range(0, segments.Count),
+                new ParallelOptions { MaxDegreeOfParallelism = ThumbnailWorkers, CancellationToken = token },
+                async (i, ct) =>
+                {
+                    var segment = segments[i];
+                    var segmentWidth = segment.Duration / duration * trackWidth;
+                    var thumbnailCount = Math.Clamp((int)Math.Ceiling(segmentWidth / 72), 1, 8);
+                    var segmentFolder = Path.Combine(folder, i.ToString("0000"));
 
-                IReadOnlyList<string> paths;
-                try
-                {
-                    paths = await _ffmpeg.ExtractSegmentThumbnailsAsync(clip.FilePath, segment, segmentFolder, thumbnailCount, cts.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    failedThumbnailCount++;
-                    Debug.WriteLine($"Thumbnail extraction failed for {clip.FileName} segment {i} ({TimelineSegment.TimeFmt(segment.Start)} - {TimelineSegment.TimeFmt(segment.End)}): {ex}");
-                    continue;
-                }
-
-                await Dispatcher.UIThread.InvokeAsync(() =>
-                {
-                    if (cts.IsCancellationRequested || !ReferenceEquals(clip, SelectedClip))
+                    List<Bitmap> bitmaps;
+                    try
+                    {
+                        var paths = await _ffmpeg.ExtractSegmentThumbnailsAsync(clip.FilePath, segment, segmentFolder, thumbnailCount, ct);
+                        bitmaps = paths.Select(path => new Bitmap(path)).ToList();
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex) when (!FfmpegService.IsMissingToolException(ex))
+                    {
+                        Interlocked.Increment(ref failedThumbnailCount);
+                        Debug.WriteLine($"Thumbnail extraction failed for {clip.FileName} segment {i} ({TimelineSegment.TimeFmt(segment.Start)} - {TimelineSegment.TimeFmt(segment.End)}): {ex}");
                         return;
+                    }
 
-                    foreach (var path in paths)
-                        segment.Thumbnails.Add(new Bitmap(path));
+                    await Dispatcher.UIThread.InvokeAsync(() =>
+                    {
+                        if (token.IsCancellationRequested || !ReferenceEquals(clip, SelectedClip))
+                        {
+                            foreach (var bitmap in bitmaps)
+                                bitmap.Dispose();
+                            return;
+                        }
+
+                        foreach (var bitmap in bitmaps)
+                            segment.Thumbnails.Add(bitmap);
+                    });
                 });
-            }
 
-            if (!cts.IsCancellationRequested && ReferenceEquals(clip, SelectedClip))
+            if (!token.IsCancellationRequested && ReferenceEquals(clip, SelectedClip))
                 Status = failedThumbnailCount == 0
                     ? "Thumbnail track ready."
                     : "Some timeline thumbnails could not be created.";
@@ -904,6 +944,16 @@ public partial class MainWindowViewModel : ObservableObject
                 Debug.WriteLine($"Thumbnail track failed for {clip.FileName}: {ex}");
                 Status = "Timeline thumbnails could not be created.";
             }
+        }
+        finally
+        {
+            if (ReferenceEquals(_thumbnailCts, cts))
+                _thumbnailCts = null;
+
+            cts.Dispose();
+
+            // The bitmaps are decoded into memory, so the extracted files are no longer needed.
+            try { Directory.Delete(folder, true); } catch { }
         }
     }
 
